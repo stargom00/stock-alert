@@ -34,27 +34,27 @@ print(f"[시작] 총 {len(alerts)}개 알림 설정됨")
 
 def get_stock_data(ticker):
     try:
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price,summaryDetail"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
-        price_data = data["quoteSummary"]["result"][0]["price"]
-        price = float(price_data["regularMarketPrice"]["raw"])
-        change = float(price_data["regularMarketChange"]["raw"])
-        change_pct = float(price_data["regularMarketChangePercent"]["raw"]) * 100
-        prev_close = price - change
-        currency = price_data.get("currency", "USD")
+        meta = data["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        currency = meta.get("currency", "USD")
+        week52_high = float(meta.get("fiftyTwoWeekHigh", 0))
+        week52_low = float(meta.get("fiftyTwoWeekLow", 0))
 
-        summary = data["quoteSummary"]["result"][0].get("summaryDetail", {})
-        week52_high = float(summary.get("fiftyTwoWeekHigh", {}).get("raw", 0))
-        week52_low = float(summary.get("fiftyTwoWeekLow", {}).get("raw", 0))
+        # 등락률: API에서 직접 가져오기
+        change_pct = float(meta.get("regularMarketChangePercent", 0)) * 100
+        change = float(meta.get("regularMarketChange", 0))
+        prev_close = price - change if change else price
 
         return {
             "price": price,
-            "prev_close": prev_close,
+            "prev_close": round(prev_close, 2),
             "currency": currency,
-            "change": change,
-            "change_pct": change_pct,
+            "change": round(change, 2),
+            "change_pct": round(change_pct, 2),
             "week52_high": week52_high,
             "week52_low": week52_low,
         }
