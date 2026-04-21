@@ -34,18 +34,22 @@ print(f"[시작] 총 {len(alerts)}개 알림 설정됨")
 
 def get_stock_data(ticker):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1y"
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price,summaryDetail"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
-        meta = data["chart"]["result"][0]["meta"]
-        price = float(meta["regularMarketPrice"])
-        prev_close = float(meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose") or price)
-        currency = meta.get("currency", "USD")
-        week52_high = float(meta.get("fiftyTwoWeekHigh", 0))
-        week52_low = float(meta.get("fiftyTwoWeekLow", 0))
+        price_data = data["quoteSummary"]["result"][0]["price"]
+        price = float(price_data["regularMarketPrice"]["raw"])
+        prev_close = float(price_data["regularMarketPreviousClose"]["raw"])
+        currency = price_data.get("currency", "USD")
         change = price - prev_close
         change_pct = (change / prev_close * 100) if prev_close else 0
+
+        # 52주 고저는 summaryDetail에서
+        summary = data["quoteSummary"]["result"][0].get("summaryDetail", {})
+        week52_high = float(summary.get("fiftyTwoWeekHigh", {}).get("raw", 0))
+        week52_low = float(summary.get("fiftyTwoWeekLow", {}).get("raw", 0))
+
         return {
             "price": price,
             "prev_close": prev_close,
