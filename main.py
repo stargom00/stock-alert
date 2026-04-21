@@ -257,3 +257,7 @@ while True:
         last_update_id = update["update_id"] + 1
         msg = update.get("message", {})
         text = msg.get("text", "")
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        if text and not text.startswith("/"):
+            handle_message(text, chat_id)
+    time.sleep(1)
