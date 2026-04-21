@@ -40,9 +40,9 @@ def get_stock_data(ticker):
         data = res.json()
         price_data = data["quoteSummary"]["result"][0]["price"]
         price = float(price_data["regularMarketPrice"]["raw"])
-        prev_close = float(price_data["regularMarketPreviousClose"]["raw"])
         change = float(price_data["regularMarketChange"]["raw"])
         change_pct = float(price_data["regularMarketChangePercent"]["raw"]) * 100
+        prev_close = price - change
         currency = price_data.get("currency", "USD")
 
         summary = data["quoteSummary"]["result"][0].get("summaryDetail", {})
