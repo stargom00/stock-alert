@@ -40,7 +40,7 @@ def get_stock_data(ticker):
         data = res.json()
         meta = data["chart"]["result"][0]["meta"]
         price = float(meta["regularMarketPrice"])
-        prev_close = float(meta.get("chartPreviousClose", price))
+        prev_close = float(meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose") or price)
         currency = meta.get("currency", "USD")
         week52_high = float(meta.get("fiftyTwoWeekHigh", 0))
         week52_low = float(meta.get("fiftyTwoWeekLow", 0))
