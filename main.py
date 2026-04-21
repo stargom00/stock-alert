@@ -41,11 +41,10 @@ def get_stock_data(ticker):
         price_data = data["quoteSummary"]["result"][0]["price"]
         price = float(price_data["regularMarketPrice"]["raw"])
         prev_close = float(price_data["regularMarketPreviousClose"]["raw"])
+        change = float(price_data["regularMarketChange"]["raw"])
+        change_pct = float(price_data["regularMarketChangePercent"]["raw"]) * 100
         currency = price_data.get("currency", "USD")
-        change = price - prev_close
-        change_pct = (change / prev_close * 100) if prev_close else 0
 
-        # 52주 고저는 summaryDetail에서
         summary = data["quoteSummary"]["result"][0].get("summaryDetail", {})
         week52_high = float(summary.get("fiftyTwoWeekHigh", {}).get("raw", 0))
         week52_low = float(summary.get("fiftyTwoWeekLow", {}).get("raw", 0))
