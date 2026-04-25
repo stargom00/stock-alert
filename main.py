@@ -44,8 +44,8 @@ def get_stock_data(ticker):
         week52_high = float(meta.get("fiftyTwoWeekHigh", 0))
         week52_low = float(meta.get("fiftyTwoWeekLow", 0))
 
-        # 등락률: API에서 직접 가져오기
-        change_pct = float(meta.get("regularMarketChangePercent", 0)) * 100
+        # ✅ 수정: * 100 제거 (API가 이미 퍼센트 값으로 반환함)
+        change_pct = float(meta.get("regularMarketChangePercent", 0))
         change = float(meta.get("regularMarketChange", 0))
         prev_close = price - change if change else price
 
@@ -156,7 +156,6 @@ def handle_message(text, chat_id):
             chat_id
         )
     else:
-        # 기본 현재가
         send_telegram(
             f"📈 <b>{ticker}</b> 현재가\n"
             f"{price_str} ({data['currency']})\n"
@@ -203,14 +202,18 @@ def check_surge():
         if abs(pct) >= SURGE_THRESHOLD:
             emoji = "🚀" if pct > 0 else "📉"
             prev = prev_prices.get(ticker)
-            if prev != round(pct, 1):
-                prev_prices[ticker] = round(pct, 1)
+            # ✅ 수정: 이전 값과 1% 이상 차이날 때만 재알림
+            if prev is None or abs(prev - pct) >= 1.0:
+                prev_prices[ticker] = pct
                 send_telegram(
                     f"{emoji} <b>{ticker} 급{'등' if pct > 0 else '락'} 알림!</b>\n\n"
                     f"현재가: {format_price(data['price'], data['currency'])}\n"
                     f"등락률: {pct:+.2f}%\n"
                     f"시각: {datetime.now().strftime('%H:%M:%S')}"
                 )
+        else:
+            # ✅ 수정: 급등락 구간 벗어나면 초기화 (재진입 감지용)
+            prev_prices.pop(ticker, None)
 
 def morning_summary():
     """아침 9시 요약"""
@@ -224,7 +227,6 @@ def morning_summary():
             emoji = "🟢" if data["change_pct"] >= 0 else "🔴"
             msg += f"{emoji} <b>{ticker}</b>: {format_price(data['price'], data['currency'])} ({data['change_pct']:+.2f}%)\n"
         else:
-            # 코인 시도
             crypto_data = get_crypto_data(ticker)
             if crypto_data:
                 emoji = "🟢" if crypto_data["change_pct"] >= 0 else "🔴"
