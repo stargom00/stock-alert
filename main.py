@@ -44,17 +44,17 @@ def get_stock_data(ticker):
         week52_high = float(meta.get("fiftyTwoWeekHigh", 0))
         week52_low = float(meta.get("fiftyTwoWeekLow", 0))
 
-        # ✅ 수정: * 100 제거 (API가 이미 퍼센트 값으로 반환함)
-        change_pct = float(meta.get("regularMarketChangePercent", 0))
-        change = float(meta.get("regularMarketChange", 0))
-        prev_close = price - change if change else price
+        # ✅ 수정: previousClose로 어제 종가 기준 등락률 계산
+        prev_close = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
         return {
             "price": price,
             "prev_close": round(prev_close, 2),
             "currency": currency,
-            "change": round(change, 2),
-            "change_pct": round(change_pct, 2),
+            "change": change,
+            "change_pct": change_pct,
             "week52_high": week52_high,
             "week52_low": week52_low,
         }
@@ -202,7 +202,7 @@ def check_surge():
         if abs(pct) >= SURGE_THRESHOLD:
             emoji = "🚀" if pct > 0 else "📉"
             prev = prev_prices.get(ticker)
-            # ✅ 수정: 이전 값과 1% 이상 차이날 때만 재알림
+            # ✅ 이전 값과 1% 이상 차이날 때만 재알림
             if prev is None or abs(prev - pct) >= 1.0:
                 prev_prices[ticker] = pct
                 send_telegram(
@@ -212,7 +212,7 @@ def check_surge():
                     f"시각: {datetime.now().strftime('%H:%M:%S')}"
                 )
         else:
-            # ✅ 수정: 급등락 구간 벗어나면 초기화 (재진입 감지용)
+            # ✅ 급등락 구간 벗어나면 초기화 (재진입 감지용)
             prev_prices.pop(ticker, None)
 
 def morning_summary():
