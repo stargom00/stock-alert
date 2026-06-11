@@ -108,8 +108,34 @@ def format_price(price, currency):
         return f"{symbol}{price:,.0f}"
     return f"{symbol}{price:,.2f}"
 
+HELP_MESSAGE = (
+    "💬 <b>얼마냐봇 사용방법</b>\n\n"
+    "📈 <b>주식 조회</b>\n"
+    "• <code>AAPL</code> → 현재가\n"
+    "• <code>AAPL 등락</code> → 오늘 등락률\n"
+    "• <code>AAPL 52주</code> → 52주 최고/최저\n"
+    "• 한국 주식은 코드 뒤에 .KS(코스피)/.KQ(코스닥)\n"
+    "  예: <code>005930.KS</code> (삼성전자)\n\n"
+    "🪙 <b>코인 조회</b>\n"
+    "• <code>BTC</code> → 비트코인 현재가\n"
+    "• 지원: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, ONDO\n\n"
+    "🔔 <b>자동 알림</b>\n"
+    "• 목표가 도달 알림 (30초마다 확인)\n"
+    "• 급등락 알림 (5분마다 확인)\n"
+    "• 아침 9시 시세 요약\n"
+    "※ 알림 종목 변경은 Railway의 Variables에서\n"
+    "  (ALERTS, MORNING_TICKERS)\n\n"
+    "❓ 이 메시지 다시 보기: <code>알려줘</code> 또는 <code>사용방법</code>"
+)
+
 def handle_message(text, chat_id):
     text = text.strip()
+
+    # 도움말 요청
+    if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
+        send_telegram(HELP_MESSAGE, chat_id)
+        return
+
     parts = text.upper().split()
     ticker = parts[0]
     command = parts[1] if len(parts) > 1 else ""
@@ -239,12 +265,7 @@ send_telegram(
     "📌 모니터링 중인 종목:\n" +
     "\n".join([f"• {a['ticker']} {'이상' if a['condition']=='above' else '이하'} {a['target']}" for a in alerts]) +
     f"\n⚡ 급등락 기준: ±{SURGE_THRESHOLD}%\n\n"
-    "💬 <b>사용법:</b>\n"
-    "• <code>AAPL</code> → 현재가\n"
-    "• <code>AAPL 등락</code> → 오늘 등락률\n"
-    "• <code>AAPL 52주</code> → 52주 고저\n"
-    "• <code>BTC</code> → 비트코인 현재가\n"
-    "• 코인: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, ONDO"
+    "💬 사용방법이 궁금하면 <code>알려줘</code> 라고 보내주세요!"
 )
 
 # 스케줄
