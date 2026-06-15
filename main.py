@@ -1,4 +1,5 @@
 import os
+from names import resolve_ticker
 import time
 import requests
 import schedule
@@ -142,7 +143,8 @@ def format_price(price, currency):
 HELP_MESSAGE = (
     "💬 <b>얼마냐봇 사용방법</b>\n\n"
     "📈 <b>주식 조회</b>\n"
-    "• <code>AAPL</code> → 현재가\n"
+    "• <code>삼성전자</code> 또는 <code>네이버</code> → 이름으로 검색\n"
+    "• <code>AAPL</code> 또는 <code>애플</code> → 현재가\n"
     "• <code>AAPL 등락</code> → 오늘 등락률\n"
     "• <code>AAPL 52주</code> → 52주 최고/최저\n"
     "• 한국 주식은 코드 뒤에 .KS(코스피)/.KQ(코스닥)\n"
@@ -167,9 +169,11 @@ def handle_message(text, chat_id):
         send_telegram(HELP_MESSAGE, chat_id)
         return
 
-    parts = text.upper().split()
-    ticker = parts[0]
-    command = parts[1] if len(parts) > 1 else ""
+    parts = text.split()
+    raw = parts[0]
+    command = parts[1].upper() if len(parts) > 1 else ""
+    # 한글/영문 이름이면 코드로 변환 (예: 네이버 → 035420.KS, 애플 → AAPL)
+    ticker = resolve_ticker(raw).upper()
 
     # 코인 먼저 시도
     crypto_tickers = ["BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "LINK", "ONDO"]
@@ -188,7 +192,7 @@ def handle_message(text, chat_id):
 
     data = get_stock_data(ticker)
     if not data:
-        send_telegram(f"❌ <b>{ticker}</b> 를 찾을 수 없어요.\n종목 코드를 확인해주세요.\n\n예: AAPL, TSLA, 005930.KS\n코인: BTC, ETH, SOL", chat_id)
+        send_telegram(f"❌ <b>{raw}</b> 를 찾을 수 없어요.\n이름이나 코드를 확인해주세요.\n\n예: 삼성전자, 네이버, 애플\n또는: AAPL, 005930.KS\n코인: BTC, ETH, SOL", chat_id)
         return
 
     price_str = format_price(data["price"], data["currency"])
