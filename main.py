@@ -113,6 +113,80 @@ def get_crypto_data(ticker):
     except:
         return None
 
+
+def get_market_trading_value():
+    """코스피/코스닥 시장 전체 거래대금(KRX 기준) 조회.
+    pykrx 사용. 실패 시 None 반환(KRX 차단·휴장 등)."""
+    try:
+        from pykrx import stock
+        from datetime import datetime, timedelta
+        # 최근 거래일 찾기 (오늘이 휴장이면 직전 영업일)
+        for back in range(0, 7):
+            d = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
+            try:
+                kospi = stock.get_index_ohlcv(d, d, "1001")    # 코스피 지수
+                kosdaq = stock.get_index_ohlcv(d, d, "2001")   # 코스닥 지수
+                if not kospi.empty and not kosdaq.empty:
+                    return {
+                        "date": d,
+                        "kospi_value": int(kospi["거래대금"].iloc[0]),
+                        "kosdaq_value": int(kosdaq["거래대금"].iloc[0]),
+                    }
+            except Exception:
+                continue
+        return None
+    except Exception as e:
+        print(f"[거래대금 조회 실패] {e}")
+        return None
+
+
+def get_upbit_trading_value():
+    """업비트 원화마켓 24시간 누적 거래대금(KRW) 합계."""
+    try:
+        # 원화마켓 전체 티커
+        mk = requests.get("https://api.upbit.com/v1/market/all", timeout=10).json()
+        krw_markets = [m["market"] for m in mk if m["market"].startswith("KRW-")]
+        total = 0.0
+        # 티커를 100개씩 묶어 조회
+        for i in range(0, len(krw_markets), 100):
+            chunk = krw_markets[i:i+100]
+            params = {"markets": ",".join(chunk)}
+            r = requests.get("https://api.upbit.com/v1/ticker", params=params, timeout=10).json()
+            for t in r:
+                total += t.get("acc_trade_price_24h", 0)
+        return total
+    except Exception as e:
+        print(f"[업비트 거래대금 실패] {e}")
+        return None
+
+
+def format_trillion(won):
+    """원 단위 → '조/억' 읽기 쉽게."""
+    jo = won / 1_0000_0000_0000   # 1조
+    if jo >= 1:
+        return f"{jo:,.1f}조원"
+    eok = won / 1_0000_0000       # 1억
+    return f"{eok:,.0f}억원"
+
+
+def trading_value_report():
+    """코스피/코스닥/업비트 거래대금 리포트 발송."""
+    msg = f"💰 <b>일일 거래대금</b> ({datetime.now(KST).strftime('%Y-%m-%d')})\n"
+    msg += "<i>KRX 기준 (NXT 미포함)</i>\n\n"
+    mv = get_market_trading_value()
+    if mv:
+        total = mv["kospi_value"] + mv["kosdaq_value"]
+        msg += f"📊 <b>코스피</b>: {format_trillion(mv['kospi_value'])}\n"
+        msg += f"📈 <b>코스닥</b>: {format_trillion(mv['kosdaq_value'])}\n"
+        msg += f"🔢 <b>합계</b>: {format_trillion(total)}\n"
+    else:
+        msg += "📊 코스피/코스닥: 조회 실패 (휴장 또는 일시 차단)\n"
+    up = get_upbit_trading_value()
+    if up:
+        msg += f"\n🪙 <b>업비트(원화)</b>: {format_trillion(up)}\n"
+    send_telegram(msg)
+
+
 def send_telegram(message, chat_id=None):
     if not TELEGRAM_TOKEN:
         return
@@ -151,6 +225,7 @@ HELP_MESSAGE = (
     "  예: <code>005930.KS</code> (삼성전자)\n\n"
     "🪙 <b>코인 조회</b>\n"
     "• <code>BTC</code> → 비트코인 현재가\n"
+    "• <code>거래대금</code> → 코스피/코스닥/업비트 거래대금\n"
     "• 지원: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, ONDO\n\n"
     "🔔 <b>자동 알림</b>\n"
     "• 목표가 도달 알림 (30초마다 확인)\n"
@@ -167,6 +242,12 @@ def handle_message(text, chat_id):
     # 도움말 요청
     if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
         send_telegram(HELP_MESSAGE, chat_id)
+        return
+
+    # 거래대금 조회
+    if text in ("거래대금", "거래대금조회", "시장", "시장거래대금"):
+        send_telegram("💰 거래대금 조회 중... (몇 초 걸려요)", chat_id)
+        trading_value_report()
         return
 
     parts = text.split()
@@ -307,6 +388,7 @@ send_telegram(
 schedule.every(30).seconds.do(check_alerts)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00").do(morning_summary)
+schedule.every().day.at("18:00").do(trading_value_report)  # 장 마감 후 거래대금 (KST)
 
 check_alerts()
 
