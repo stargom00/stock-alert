@@ -1,6 +1,7 @@
 import os
 from names import resolve_ticker
 import time
+import re
 import requests
 import schedule
 from datetime import datetime, timezone, timedelta
@@ -114,30 +115,116 @@ def get_crypto_data(ticker):
         return None
 
 
-def get_market_trading_value():
-    """코스피/코스닥 시장 전체 거래대금(KRX 기준) 조회.
-    pykrx 사용. 실패 시 None 반환(KRX 차단·휴장 등)."""
+# ══════════════════════════════════════════════════════════════
+# 코스피/코스닥 거래대금 — 네이버 금융 버전
+# (pykrx가 KRX 로그인 요구로 막혀서 교체. 스캐너와 동일한 네이버 패턴)
+# ══════════════════════════════════════════════════════════════
+_NAVER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Referer": "https://m.stock.naver.com/",
+}
+
+# 거래대금이 들어있을 법한 키 후보 (네이버가 쓰는 이름들)
+_VALUE_KEYS = [
+    "accumulatedTradingValue",   # 누적 거래대금
+    "tradingValue",
+    "accTradePrice",
+    "tradeAmount",
+    "amount",
+]
+
+
+def _to_won(raw):
+    """'12,345' / 12345 / '12345.6' 등 → float. 실패 시 None.
+    단위(원/백만원) 보정은 호출부에서."""
+    if raw is None:
+        return None
     try:
-        from pykrx import stock
-        from datetime import datetime, timedelta
-        # 최근 거래일 찾기 (오늘이 휴장이면 직전 영업일)
-        for back in range(0, 7):
-            d = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
-            try:
-                kospi = stock.get_index_ohlcv(d, d, "1001")    # 코스피 지수
-                kosdaq = stock.get_index_ohlcv(d, d, "2001")   # 코스닥 지수
-                if not kospi.empty and not kosdaq.empty:
-                    return {
-                        "date": d,
-                        "kospi_value": int(kospi["거래대금"].iloc[0]),
-                        "kosdaq_value": int(kosdaq["거래대금"].iloc[0]),
-                    }
-            except Exception:
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        s = str(raw).replace(",", "").strip()
+        m = re.search(r"-?\d+(\.\d+)?", s)
+        if not m:
+            return None
+        return float(m.group())
+    except Exception:
+        return None
+
+
+def _naver_index_trading_value(symbol):
+    """네이버에서 지수(KOSPI/KOSDAQ)의 당일 거래대금을 가져온다.
+    여러 엔드포인트를 순서대로 시도(하나 막혀도 다른 게 동작). 실패 시 None."""
+    endpoints = [
+        f"https://m.stock.naver.com/api/index/{symbol}/basic",
+        f"https://m.stock.naver.com/api/index/{symbol}/integration",
+        f"https://api.stock.naver.com/index/{symbol}/basic",
+    ]
+    for url in endpoints:
+        try:
+            res = requests.get(url, headers=_NAVER_HEADERS, timeout=10)
+            if res.status_code != 200:
                 continue
+            data = res.json()
+
+            # 탐색 대상 dict들을 모음 (응답 구조가 엔드포인트마다 다름)
+            candidates = []
+            if isinstance(data, dict):
+                candidates.append(data)
+                for k in ("result", "stockInfo", "indexInfo"):
+                    v = data.get(k)
+                    if isinstance(v, dict):
+                        candidates.append(v)
+                    elif isinstance(v, list):
+                        candidates.extend([x for x in v if isinstance(x, dict)])
+
+            # 1) 직접 키로 탐색
+            for obj in candidates:
+                for key in _VALUE_KEYS:
+                    if key in obj and obj[key] not in (None, ""):
+                        return _to_won(obj[key])
+
+            # 2) totalInfos 형태: [{"code":"accumulatedTradingValue","value":"12,345"}...]
+            for src in [data] + candidates:
+                tis = src.get("totalInfos") if isinstance(src, dict) else None
+                if isinstance(tis, list):
+                    for it in tis:
+                        if isinstance(it, dict) and it.get("code") in _VALUE_KEYS:
+                            return _to_won(it.get("value"))
+        except Exception as e:
+            print(f"[네이버 지수 조회 오류] {symbol} {url}: {e}")
+            continue
+    return None
+
+
+def get_market_trading_value():
+    """코스피/코스닥 거래대금 — 네이버 금융에서 조회.
+    반환: {"date","kospi_value","kosdaq_value"} (원 단위) 또는 None.
+
+    ⚠️ 단위 주의: 네이버 거래대금 필드 단위가 '백만원'일 수 있음.
+       Railway 로그의 [네이버 거래대금 원시값] 을 보고 자릿수가 안 맞으면
+       _UNIT_MULTIPLIER 를 조정:
+       - 결과가 너무 작게(예 0.0x조) 나오면 → 백만원 단위 → 1_000_000
+       - 결과가 정상이면 → 1
+    """
+    _UNIT_MULTIPLIER = 1_000_000   # 네이버가 '백만원' 단위로 줄 때. 안 맞으면 1로.
+
+    kospi_raw = _naver_index_trading_value("KOSPI")
+    kosdaq_raw = _naver_index_trading_value("KOSDAQ")
+
+    # 진단용 출력 (Railway 로그에서 실제 원시값 확인 → 단위/엔드포인트 검증)
+    print(f"[네이버 거래대금 원시값] KOSPI={kospi_raw}, KOSDAQ={kosdaq_raw}")
+
+    if kospi_raw is None or kosdaq_raw is None:
         return None
-    except Exception as e:
-        print(f"[거래대금 조회 실패] {e}")
-        return None
+
+    return {
+        "date": datetime.now(KST).strftime("%Y%m%d"),
+        "kospi_value": int(kospi_raw * _UNIT_MULTIPLIER),
+        "kosdaq_value": int(kosdaq_raw * _UNIT_MULTIPLIER),
+    }
 
 
 def get_upbit_trading_value():
