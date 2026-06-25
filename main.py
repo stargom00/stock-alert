@@ -320,6 +320,7 @@ HELP_MESSAGE = (
     "🔔 <b>자동 알림</b>\n"
     "• 목표가 도달 알림 (30초마다 확인)\n"
     "• 급등락 알림 (5분마다 확인)\n"
+    "• 🚀 일지 대기종목 피벗 돌파 알림 (1분마다 확인)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -514,11 +515,19 @@ def morning_summary():
     send_telegram(msg)
 
 # 시작 알림
+# 대기종목(피벗 감시) 개수 조회 (실패해도 무시)
+_pending_cnt = 0
+try:
+    _r = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+    _pending_cnt = _r.json().get("count", 0)
+except Exception:
+    pass
 send_telegram(
     "✅ <b>얼마냐봇 시작!</b>\n\n"
     "📌 모니터링 중인 종목:\n" +
     "\n".join([f"• {a['ticker']} {'이상' if a['condition']=='above' else '이하'} {a['target']}" for a in alerts]) +
-    f"\n⚡ 급등락 기준: ±{SURGE_THRESHOLD}%\n\n"
+    f"\n⚡ 급등락 기준: ±{SURGE_THRESHOLD}%\n"
+    f"🚀 피벗 돌파 감시: 일지 대기종목 {_pending_cnt}개 (1분마다)\n\n"
     "💬 사용방법이 궁금하면 <code>알려줘</code> 라고 보내주세요!"
 )
 
