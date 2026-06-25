@@ -13,6 +13,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 ALERTS_RAW = os.environ.get("ALERTS", "")
 MORNING_TICKERS = os.environ.get("MORNING_TICKERS", "")  # 아침 요약 종목 (예: AAPL;TSLA;005930.KS)
 SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기준 % (기본 5%)
+# 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
+SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
+_pivot_fired = set()   # 이미 돌파 알림 보낸 종목 id (중복 방지)
 
 def parse_alerts():
     alerts = []
@@ -393,6 +396,54 @@ def handle_message(text, chat_id):
             chat_id
         )
 
+def check_pivot_breakout():
+    """눌림목 스캐너의 대기(pending) 종목을 읽어, 피벗가 돌파 시 텔레그램 알림.
+    스캐너 /api/watch/pending에서 {ticker, name, pivot, ...} 목록을 받아
+    각 현재가가 피벗 이상이면 '돌파' 알림. 한 종목당 1회만(중복 방지)."""
+    now = datetime.now(KST).strftime("%H:%M:%S")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+        pending = res.json().get("pending", [])
+    except Exception as e:
+        print(f"[{now}] 대기종목 조회 실패: {e}")
+        return
+    if not pending:
+        return
+    print(f"[{now}] 피벗 돌파 감시: {len(pending)}종목")
+    for w in pending:
+        wid = w.get("id")
+        if wid in _pivot_fired:
+            continue
+        ticker = w.get("ticker")
+        pivot = w.get("pivot")
+        if not ticker or not pivot:
+            continue
+        data = get_stock_data(ticker)
+        if not data:
+            continue
+        price = data["price"]
+        if price >= pivot:                     # 피벗 돌파!
+            _pivot_fired.add(wid)
+            name = w.get("name") or ticker
+            entry = w.get("entry")
+            stop = w.get("stop")
+            cur = data["currency"]
+            lines = [
+                "🚀 <b>피벗 돌파!</b> 진입 검토",
+                "",
+                f"종목: <b>{name}</b> ({ticker})",
+                f"현재가: <b>{format_price(price, cur)}</b>",
+                f"피벗: {format_price(pivot, cur)} 돌파 ✅",
+            ]
+            if stop:
+                lines.append(f"손절: {format_price(stop, cur)}")
+            lines.append("")
+            lines.append("⚠️ 거래량 동반·시장 상황 확인 후 진입")
+            lines.append(f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
+            send_telegram("\n".join(lines))
+            print(f"  🚀 {name} 피벗돌파 {price} >= {pivot}")
+
+
 def check_alerts():
     now = datetime.now(KST).strftime("%H:%M:%S")
     print(f"[{now}] 가격 확인 중...")
@@ -473,6 +524,7 @@ send_telegram(
 
 # 스케줄
 schedule.every(30).seconds.do(check_alerts)
+schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00").do(morning_summary)
 schedule.every().day.at("18:00").do(trading_value_report)  # 장 마감 후 거래대금 (KST)
