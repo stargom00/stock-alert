@@ -276,6 +276,13 @@ def trading_value_report():
         msg += f"\n🪙 <b>업비트(원화)</b>: {format_trillion(up)}\n"
     send_telegram(msg)
 
+def scheduled_trading_value_report():
+    """스케줄(매일 18:00)용 거래대금 리포트. 주말(토/일)엔 자동 발송 안 함.
+    수동 '거래대금' 검색은 trading_value_report()를 직접 부르므로 영향 없음."""
+    if datetime.now(KST).weekday() >= 5:   # 5=토, 6=일
+        print(f"[거래대금 스케줄] 주말이라 건너뜀")
+        return
+    trading_value_report()
 
 def send_telegram(message, chat_id=None):
     if not TELEGRAM_TOKEN:
@@ -536,7 +543,7 @@ schedule.every(30).seconds.do(check_alerts)
 schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00").do(morning_summary)
-schedule.every().day.at("18:00").do(trading_value_report)  # 장 마감 후 거래대금 (KST)
+schedule.every().day.at("18:00").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 
 check_alerts()
 
