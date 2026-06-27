@@ -542,8 +542,8 @@ send_telegram(
 schedule.every(30).seconds.do(check_alerts)
 schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
 schedule.every(5).minutes.do(check_surge)
-schedule.every().day.at("09:00").do(morning_summary)
-schedule.every().day.at("16:00").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
+schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
+schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 
 check_alerts()
 
