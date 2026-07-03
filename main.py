@@ -64,7 +64,124 @@ def _pick_prev_close(result, price):
         return None
 
 
+import re as _re
+
+def _kr_code(ticker):
+    """한국 종목이면 6자리 코드 반환, 아니면 None. 접미사(.KS/.KQ)는 무시 —
+    사용자가 잘못 붙여도(코스닥 종목에 .ks 등) 정확히 조회되게."""
+    m = _re.match(r"^(\d{6})(\.(KS|KQ))?$", ticker.strip().upper())
+    return m.group(1) if m else None
+
+
+def get_kr_quote_naver(code6):
+    """네이버 실시간 시세 — 한국 종목의 정확한 소스 (v2.x 수정).
+    배경: 야후에 잘못된 접미사(예: 코스닥 종목의 .KS)로 유령 데이터가 존재해
+    몇 달 전 가격이 현재가로 나오는 사고 발생 (094840 → -43.82% 오표시).
+    네이버는 6자리 코드만 쓰므로 접미사 문제 자체가 없음."""
+    try:
+        url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code6}"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        j = res.json()
+        datas = j.get("result", {}).get("areas", [{}])[0].get("datas", [])
+        if not datas:
+            return None
+        d = datas[0]
+        price = float(d.get("nv") or 0)            # 현재가
+        prev = float(d.get("sv") or 0)             # 기준가(전일종가)
+        if price <= 0 or prev <= 0:
+            return None
+        change = round(price - prev, 2)
+        return {
+            "price": price,
+            "prev_close": prev,
+            "currency": "KRW",
+            "change": change,
+            "change_pct": round(change / prev * 100, 2),
+            "week52_high": float(d.get("hv52") or 0) or 0.0,
+            "week52_low": float(d.get("lv52") or 0) or 0.0,
+        }
+    except Exception as e:
+        print(f"[네이버] {code6} 조회 실패: {e}")
+        return None
+
+
+def _find_code_candidates(obj, out):
+    """JSON 어디에 있든 6자리 숫자 코드를 수집 (응답 구조 무관 방어적 탐색).
+    dict이면 code/cd/itemCode 키 우선, 아니면 모든 값 재귀."""
+    if isinstance(obj, dict):
+        for key in ("code", "cd", "itemCode", "cmp_cd", "symbolCode"):
+            v = obj.get(key)
+            if isinstance(v, str) and _re.match(r"^\d{6}$", v):
+                name = obj.get("name") or obj.get("nm") or obj.get("itemName") or ""
+                out.append((v, str(name)))
+        for v in obj.values():
+            _find_code_candidates(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _find_code_candidates(v, out)
+    elif isinstance(obj, str):
+        if _re.match(r"^\d{6}$", obj):
+            out.append((obj, ""))
+
+
+def naver_name_search(text):
+    """한글 종목명 → 6자리 코드. 네이버 자동완성 엔드포인트 3종을 순서대로 시도,
+    응답 구조가 달라도 6자리 코드를 재귀 탐색으로 추출 (v2 — 구조 추정 실패 대응)."""
+    q = text.strip()
+    headers = {"User-Agent": "Mozilla/5.0",
+               "Referer": "https://finance.naver.com/"}
+    endpoints = [
+        # 1) 모바일 프론트 API
+        ("https://m.stock.naver.com/front-api/search/autoComplete",
+         {"query": q, "target": "stock"}),
+        # 2) 주식 자동완성
+        ("https://ac.stock.naver.com/ac",
+         {"q": q, "target": "stock,index,marketindicator"}),
+        # 3) 구형 금융 자동완성 (EUC-KR)
+        ("https://ac.finance.naver.com/ac",
+         {"q": q, "q_enc": "euc-kr", "st": "111", "frm": "stock",
+          "r_format": "json", "r_enc": "utf-8", "r_unicode": "0", "t_koreng": "1"}),
+    ]
+    for url, params in endpoints:
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=8)
+            if res.status_code != 200:
+                continue
+            j = res.json()
+            cands = []
+            _find_code_candidates(j, cands)
+            if not cands:
+                continue
+            # 이름이 질의와 겹치는 후보 우선, 없으면 첫 후보
+            qn = q.replace(" ", "")
+            for code, name in cands:
+                nn = name.replace(" ", "")
+                if nn and (qn in nn or nn in qn):
+                    return code
+            return cands[0][0]
+        except Exception as e:
+            print(f"[자동완성] {url} 실패: {e}")
+            continue
+    return None
+
+
 def get_stock_data(ticker):
+    # ── 한국 종목: 네이버 우선, 실패 시 야후 폴백(.KQ→.KS, ±31% 새너티) ──
+    code6 = _kr_code(ticker)
+    if code6:
+        q = get_kr_quote_naver(code6)
+        if q:
+            return q
+        # 네이버 실패 → 야후 폴백: 두 접미사 모두 시도, 상하한(±30%) 위반 데이터 거부
+        for sfx in (".KQ", ".KS"):
+            q = _get_stock_data_yahoo(code6 + sfx)
+            if q and abs(q.get("change_pct", 0)) <= 31:
+                return q
+        return None
+    return _get_stock_data_yahoo(ticker)
+
+
+def _get_stock_data_yahoo(ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=10d"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -370,6 +487,12 @@ def handle_message(text, chat_id):
             return
 
     data = get_stock_data(ticker)
+    if not data and _re.search(r"[가-힣]", raw):
+        # names.py에 없는 한글 이름 → 네이버 자동완성으로 코드 해석 (신규 상장·개명 대응)
+        code = naver_name_search(raw)
+        if code:
+            ticker = code
+            data = get_stock_data(code)
     if not data:
         send_telegram(f"❌ <b>{raw}</b> 를 찾을 수 없어요.\n이름이나 코드를 확인해주세요.\n\n예: 삼성전자, 네이버, 애플\n또는: AAPL, 005930.KS\n코인: BTC, ETH, SOL", chat_id)
         return
