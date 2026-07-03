@@ -527,6 +527,184 @@ def handle_message(text, chat_id):
             chat_id
         )
 
+_pivot_near = set()      # 접근 예고 발송 기록
+_pos_fired = {}          # {포지션id: {'stop', '2R', '3R', ...}} 발송 기록 (재시작 시 초기화)
+
+
+def check_positions():
+    """진입중 포지션의 R 진행률 감시 (v2.1) — 2분마다.
+    +2R: 절반 익절 + 손절 본전 이동 안내 / +3R 이상: 마일스톤 / 손절가 터치: 실행 알림.
+    각 이벤트는 포지션당 1회만."""
+    now = datetime.now(KST).strftime("%H:%M:%S")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        positions = res.json().get("positions", [])
+    except Exception as e:
+        print(f"[{now}] 포지션 조회 실패: {e}")
+        return
+    if not positions:
+        return
+    print(f"[{now}] 포지션 R 감시: {len(positions)}종목")
+    for p in positions:
+        pid = p.get("id")
+        entry, stop = p.get("entry"), p.get("stop")
+        ticker = p.get("ticker")
+        if not pid or not ticker or not entry or not stop or stop >= entry:
+            continue
+        data = get_stock_data(ticker)
+        if not data:
+            continue
+        price = data["price"]
+        cur = data["currency"]
+        name = p.get("name") or ticker
+        fired = _pos_fired.setdefault(pid, set())
+        r_now = (price - entry) / (entry - stop)
+
+        # 🛑 손절가 터치
+        if price <= stop and "stop" not in fired:
+            fired.add("stop")
+            send_telegram("\n".join([
+                "🛑 <b>손절가 도달 — 실행하세요</b>",
+                "",
+                f"종목: <b>{name}</b> ({ticker})",
+                f"현재가: <b>{format_price(price, cur)}</b> ≤ 손절 {format_price(stop, cur)}",
+                f"현재 {round(r_now, 2)}R",
+                "",
+                "규칙: -1R = 손절. 협상 없음. 종료 사유 기록까지가 시스템.",
+            ]))
+            print(f"  🛑 {name} 손절 도달 {price} <= {stop}")
+            continue
+
+        # 💰 +2R: 절반 익절 + 본전 이동
+        if r_now >= 2 and "2R" not in fired:
+            fired.add("2R")
+            send_telegram("\n".join([
+                "💰 <b>+2R 도달 — 절반 익절 + 손절 본전 이동</b>",
+                "",
+                f"종목: <b>{name}</b> ({ticker})",
+                f"현재가: <b>{format_price(price, cur)}</b> (진입 {format_price(entry, cur)})",
+                f"진행: <b>+{round(r_now, 2)}R</b>",
+                "",
+                "① 절반 익절 → 시스템 월급 확정",
+                "② 나머지 손절을 진입가로 이동 → 프리 트레이드",
+                "③ 이후 10/21일선 트레일링 — 러너는 조급하게 걷지 않기",
+                "실행 후 일지에 부분청산 기록하세요.",
+            ]))
+            print(f"  💰 {name} +2R 도달 ({round(r_now, 2)}R)")
+            continue
+
+        # 🏔 +3R 이상 마일스톤 (각 1회)
+        if r_now >= 3:
+            ms = f"{int(r_now)}R"
+            if ms not in fired:
+                fired.add(ms)
+                send_telegram("\n".join([
+                    f"🏔 <b>+{int(r_now)}R 마일스톤</b> — 러너가 달리는 중",
+                    "",
+                    f"종목: <b>{name}</b> ({ticker})",
+                    f"현재가: <b>{format_price(price, cur)}</b> · <b>+{round(r_now, 2)}R</b>",
+                    "",
+                    "행동: 없음. 10/21일선 종가 이탈 전까지 보유.",
+                ]))
+                print(f"  🏔 {name} +{int(r_now)}R")
+
+
+_gate_last = {"suggest": None}
+
+
+def check_market_gate():
+    """시장 게이트 자동 제안 감시 (v2.2) — 30분마다.
+    제안이 바뀌는 순간(특히 FTD 발생 → 🟢) 텔레그램 알림. 게이트 전환이라는
+    가장 중요한 판단을 사람이 감정으로 하지 않게 하는 마지막 조각."""
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/market/gate", timeout=15)
+        j = res.json()
+        if not j.get("ok"):
+            return
+    except Exception as e:
+        print(f"[게이트] 조회 실패: {e}")
+        return
+    sug = j.get("suggest")
+    if not sug or sug == _gate_last["suggest"]:
+        _gate_last["suggest"] = sug
+        return
+    prev = _gate_last["suggest"]
+    _gate_last["suggest"] = sug
+    if prev is None:
+        return   # 봇 시작 직후 첫 관측은 알림 없이 기억만
+    em = {"confirmed": "🟢 확인된 상승", "pressure": "🟡 조정 압박", "correction": "🔴 조정"}
+    lines = [
+        "📢 <b>시장 게이트 제안 변경</b>",
+        "",
+        f"{em.get(prev, prev)} → <b>{em.get(sug, sug)}</b>",
+        f"근거: {j.get('why', '')}",
+    ]
+    if j.get("ftd"):
+        lines.append("")
+        lines.append("🔔 FTD 확인 — 시험 매수 0.5R 1~2건부터. 풀사이즈 금지.")
+    cur = j.get("current")
+    if cur and cur != sug:
+        lines.append("")
+        lines.append(f"현재 설정({em.get(cur, cur)})과 다름 — 스캐너 일지 탭에서 [적용] 확인하세요.")
+    send_telegram("\n".join(lines))
+    print(f"[게이트] {prev} → {sug}")
+
+
+def weekly_report():
+    """주간 리포트 (v2.2) — 일요일 09:00 KST.
+    주말 루틴의 자동화: 주간 R·승패·충동 카운트·진입중 포지션."""
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/journal", timeout=30)
+        rows = res.json()
+        if isinstance(rows, dict):
+            rows = rows.get("journal", rows.get("rows", []))
+    except Exception as e:
+        print(f"[주간리포트] 일지 조회 실패: {e}")
+        return
+    from datetime import timedelta
+    now = datetime.now(KST)
+    week_start = (now - timedelta(days=now.weekday() + 7)).strftime("%Y-%m-%d")  # 지난 월요일
+    week_end = (now - timedelta(days=1)).strftime("%Y-%m-%d")                    # 어제(토)
+    wins = losses = impulse = 0
+    r_sum = 0.0
+    open_pos = []
+    for r in rows if isinstance(rows, list) else []:
+        status = r.get("status") or "entered"
+        if status == "entered" and r.get("result_r") == "":
+            open_pos.append(r.get("name") or r.get("ticker") or "?")
+            continue
+        if (r.get("category") or "추세추종") == "관찰":
+            continue
+        d = r.get("closed_date") or r.get("last_checked") or r.get("date") or ""
+        if not (week_start <= d <= week_end):
+            continue
+        try:
+            rv = float(r.get("result_r"))
+        except (TypeError, ValueError):
+            continue
+        r_sum += rv
+        wins += rv > 0
+        losses += rv < 0
+        reason = (r.get("exit_reason") or r.get("closed_reason") or "")
+        impulse += "충동" in str(reason)
+    total = wins + losses
+    lines = [
+        "📊 <b>주간 리포트</b>",
+        f"{week_start} ~ {week_end}",
+        "",
+        f"종료 매매: {total}건 (승 {wins} / 패 {losses})",
+        f"주간 합계: <b>{'+' if r_sum > 0 else ''}{round(r_sum, 2)}R</b>",
+        f"충동 청산: {impulse}건" + (" ⚠️" if impulse else " ✅"),
+        f"진입중: {len(open_pos)}종목" + (f" ({', '.join(open_pos[:5])})" if open_pos else ""),
+        "",
+        "주말 루틴: 섹터 탭 주도업종 확인 · 관찰 리스트 정리 · CSV 백업",
+    ]
+    if total == 0:
+        lines.insert(4, "(이번 주 종료 매매 없음 — 🔴 게이트면 그게 정상)")
+    send_telegram("\n".join(lines))
+    print("[주간리포트] 발송")
+
+
 def check_pivot_breakout():
     """눌림목 스캐너의 대기(pending) 종목을 읽어, 피벗가 돌파 시 텔레그램 알림.
     스캐너 /api/watch/pending에서 {ticker, name, pivot, ...} 목록을 받아
@@ -553,6 +731,21 @@ def check_pivot_breakout():
         if not data:
             continue
         price = data["price"]
+        # ⚡ 접근 예고 (v2.1): 피벗 -1% 이내 진입 시 1회 — 돌파 전에 준비시킴
+        if wid not in _pivot_near and pivot * 0.99 <= price < pivot:
+            _pivot_near.add(wid)
+            name = w.get("name") or ticker
+            cur = data["currency"]
+            send_telegram("\n".join([
+                "⚡ <b>피벗 접근</b> — 준비",
+                "",
+                f"종목: <b>{name}</b> ({ticker})",
+                f"현재가: <b>{format_price(price, cur)}</b> (피벗까지 {round((pivot / price - 1) * 100, 2)}%)",
+                f"피벗: {format_price(pivot, cur)}",
+                "",
+                "돌파 시 다시 알림. 게이트·거래량 미리 확인해두세요.",
+            ]))
+            print(f"  ⚡ {name} 피벗 접근 {price} → {pivot}")
         if price >= pivot:                     # 피벗 돌파!
             _pivot_fired.add(wid)
             name = w.get("name") or ticker
@@ -664,6 +857,9 @@ send_telegram(
 # 스케줄
 schedule.every(30).seconds.do(check_alerts)
 schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
+schedule.every(2).minutes.do(check_positions)        # 진입 포지션 R 마일스톤/손절 감시 (v2.1)
+schedule.every(30).minutes.do(check_market_gate)     # 시장 게이트 제안 변경 감시 (v2.2)
+schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
