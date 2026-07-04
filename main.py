@@ -748,6 +748,58 @@ def weekly_report():
     print("[주간리포트] 발송")
 
 
+_dist_fired = {}         # {포지션id: 마지막 경고 날짜} — 하루 1회만
+
+
+def check_distribution():
+    """보유 종목 분산(매도) 신호 감시 (v2.4) — 하루 2회(11:00, 15:00 KST).
+    진입 종목이 분산 danger면 ⚠️ 알림. 같은 종목 하루 1회만."""
+    now = datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        positions = res.json().get("positions", [])
+    except Exception as e:
+        print(f"[분산] 포지션 조회 실패: {e}")
+        return
+    for p in positions:
+        pid = p.get("id")
+        ticker = p.get("ticker")
+        if not pid or not ticker:
+            continue
+        if _dist_fired.get(pid) == today:      # 오늘 이미 경고함
+            continue
+        code = _kr_code(ticker)
+        q = f"{code}.KQ" if code else ticker
+        try:
+            res = requests.get(f"{SCANNER_URL}/api/dist/{q}", timeout=10)
+            j = res.json()
+            if not j.get("ok") and code:
+                res = requests.get(f"{SCANNER_URL}/api/dist/{code}.KS", timeout=10)
+                j = res.json()
+        except Exception:
+            continue
+        if not j.get("ok") or j.get("level") != "danger":
+            continue
+        _dist_fired[pid] = today
+        name = p.get("name") or ticker
+        sigs = j.get("signals", [])
+        detail = j.get("detail", {})
+        send_telegram("\n".join([
+            "⚠️ <b>분산 경고 — 보유 종목 매도 신호</b>",
+            "",
+            f"종목: <b>{name}</b> ({ticker})",
+            f"신호: {', '.join(sigs)}",
+            f"당일 {detail.get('day_ret_pct', '?')}% · 거래량 {detail.get('vol_ratio', '?')}배",
+            "",
+            "기관 매도 신호가 감지됐어요. 규칙 점검:",
+            "· +2R 넘었으면 이미 절반 익절했는지",
+            "· 남은 물량 트레일링 손절(10/21일선) 확인",
+            "· 셋업 훼손이면 손절가 전이라도 이탈 검토 (BHE 교훈)",
+        ]))
+        print(f"  ⚠️ {name} 분산 danger: {sigs}")
+
+
 def check_pivot_breakout():
     """눌림목 스캐너의 대기(pending) 종목을 읽어, 피벗가 돌파 시 텔레그램 알림.
     스캐너 /api/watch/pending에서 {ticker, name, pivot, ...} 목록을 받아
@@ -909,6 +961,8 @@ schedule.every(30).seconds.do(check_alerts)
 schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
 schedule.every(2).minutes.do(check_positions)        # 진입 포지션 R 마일스톤/손절 감시 (v2.1)
 schedule.every(30).minutes.do(check_market_gate)     # 시장 게이트 제안 변경 감시 (v2.2)
+schedule.every().day.at("11:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (v2.4)
+schedule.every().day.at("15:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (장 마감 전)
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
