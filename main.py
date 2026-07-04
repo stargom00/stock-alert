@@ -99,6 +99,7 @@ def get_kr_quote_naver(code6):
             "change_pct": round(change / prev * 100, 2),
             "week52_high": float(d.get("hv52") or 0) or 0.0,
             "week52_low": float(d.get("lv52") or 0) or 0.0,
+            "volume": float(d.get("aq") or 0),   # 당일 누적 거래량 (v2.3)
         }
     except Exception as e:
         print(f"[네이버] {code6} 조회 실패: {e}")
@@ -527,6 +528,48 @@ def handle_message(text, chat_id):
             chat_id
         )
 
+def _session_elapsed_ratio(now_kst):
+    """한국장(09:00~15:30, 6.5h) 경과 비율. 장외면 1.0(종가 확정)."""
+    open_min, close_min = 9 * 60, 15 * 60 + 30
+    cur_min = now_kst.hour * 60 + now_kst.minute
+    if cur_min <= open_min:
+        return 0.01
+    if cur_min >= close_min:
+        return 1.0
+    return (cur_min - open_min) / (close_min - open_min)
+
+
+def volume_confirm(ticker, cur_volume, now_kst):
+    """돌파 거래량 확증 (v2.3): 실시간 누적 거래량을 시간보정해 예상 종가
+    거래량비 계산. 평균은 스캐너 /api/vol에서. 반환 (표시문자열, 신뢰여부)."""
+    code = _kr_code(ticker)
+    if not code or not cur_volume:
+        return None, False
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8)
+        j = res.json()
+        if not j.get("ok"):
+            res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KS", timeout=8)
+            j = res.json()
+        avg = j.get("avg_volume_50") or 0
+    except Exception:
+        return None, False
+    if not avg:
+        return None, False
+    ratio = (cur_volume / _session_elapsed_ratio(now_kst)) / avg
+    pct = int(ratio * 100)
+    early = (now_kst.hour == 9 and now_kst.minute < 30)
+    if ratio >= 1.5:
+        tag = f"🟢 거래량 확증 (예상 {pct}%)"
+    elif ratio >= 1.0:
+        tag = f"🟡 거래량 애매 (예상 {pct}%)"
+    else:
+        tag = f"🔴 거래량 부족 (예상 {pct}%) — 가짜 돌파 의심"
+    if early:
+        tag += " ※장초반 추정 신뢰↓"
+    return tag, True
+
+
 _pivot_near = set()      # 접근 예고 발송 기록
 _pos_fired = {}          # {포지션id: {'stop', '2R', '3R', ...}} 발송 기록 (재시작 시 초기화)
 
@@ -761,8 +804,15 @@ def check_pivot_breakout():
             ]
             if stop:
                 lines.append(f"손절: {format_price(stop, cur)}")
+            # 거래량 확증 (v2.3): 실시간 누적 거래량 시간보정 → 예상 거래량비
+            vtag, vok = volume_confirm(ticker, data.get("volume"), datetime.now(KST))
             lines.append("")
-            lines.append("⚠️ 거래량 동반·시장 상황 확인 후 진입")
+            if vok:
+                lines.append(vtag)
+                lines.append("→ 🟢면 진입 검토 · 🔴면 다음 기회")
+            else:
+                lines.append("⚠️ 거래량은 HTS에서 직접 확인 (전일 동시간 대비)")
+            lines.append("시장 게이트 확인 후 진입 · 피벗 +2% 추격 금지")
             lines.append(f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
             send_telegram("\n".join(lines))
             print(f"  🚀 {name} 피벗돌파 {price} >= {pivot}")
