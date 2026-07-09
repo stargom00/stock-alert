@@ -16,6 +16,7 @@ SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기
 # 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
 SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
 _pivot_fired = set()   # 이미 돌파 알림 보낸 종목 id (중복 방지)
+_target_fired = set()  # 하향 목표가 도달 알림 보낸 종목 id (v2.6)
 
 def parse_alerts():
     alerts = []
@@ -937,7 +938,37 @@ def check_pivot_breakout():
         if not data:
             continue
         price = data["price"]
-        # ⚡ 접근 예고 (v2.1): 피벗 -1% 이내 진입 시 1회 — 돌파 전에 준비시킴
+        # ── 하향 목표가 도달 (v2.6) ── 눌림목 대기용.
+        # 진입 목표가가 '현재가보다 낮게' 설정된 종목(RCUS $30인데 목표 $26)이,
+        # 목표가까지 눌려 내려오면 "지지 도달, 반등 확인" 알림. 피벗(상향)과 반대.
+        tb = w.get("target_below")
+        try:
+            tb = float(tb) if tb else None
+        except (TypeError, ValueError):
+            tb = None
+        # 하향 목표 판별: 목표가(entry)가 '현재가보다 낮게' 설정 = 눌림목 대기.
+        # RCUS 목표 $26 < 현재 $30 → 내려오길 기다리는 중. 이미 목표 아래로
+        # 내려왔으면(price <= tb) 도달 알림. 목표가 현재가 위면 상향 대기라 skip.
+        if tb and price > tb and wid not in _target_fired:
+            # 목표까지 +2% 이내로 근접하면 알림 (딱 도달 전에 준비)
+            if price <= tb * 1.02:
+                _target_fired.add(wid)
+                name = w.get("name") or ticker
+                cur = data["currency"]
+                stop = w.get("stop")
+                send_telegram("\n".join([
+                    "🎯 <b>목표가 도달 — 눌림목 진입 준비</b>",
+                    "",
+                    f"종목: <b>{name}</b> ({ticker})",
+                    f"현재가: <b>{format_price(price, cur)}</b> (목표 {format_price(tb, cur)})",
+                    f"손절: {format_price(stop, cur)}" if stop else "",
+                    "",
+                    "지지선까지 눌려 내려왔어요. 진입 규칙:",
+                    "· 지지 찍고 반등일(양봉+거래량 회복) 확인 후 진입",
+                    "· 지금 사는 건 떨어지는 칼 — 반등 확인 먼저",
+                    "· 게이트 🔴면 관찰만",
+                ]))
+                print(f"  🎯 {name} 목표가 도달 {price} ≤ {tb}")
         if wid not in _pivot_near and pivot * 0.99 <= price < pivot:
             _pivot_near.add(wid)
             name = w.get("name") or ticker
