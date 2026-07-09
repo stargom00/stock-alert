@@ -800,6 +800,117 @@ def check_distribution():
         print(f"  ⚠️ {name} 분산 danger: {sigs}")
 
 
+_ma_break_fired = {}     # {포지션id: 날짜} — 이평 이탈 하루 1회
+_ma_near_fired = {}      # {티커: 날짜} — 이평 접근 하루 1회
+
+
+def _get_ma(ticker):
+    """스캐너에서 종목 이평값 받기. 실패 시 None."""
+    code = _kr_code(ticker)
+    for q in ([f"{code}.KQ", f"{code}.KS"] if code else [ticker]):
+        try:
+            res = requests.get(f"{SCANNER_URL}/api/ma/{q}", timeout=8)
+            j = res.json()
+            if j.get("ok"):
+                return j
+        except Exception:
+            continue
+    return None
+
+
+def check_ma_break():
+    """보유 종목 이평 이탈 감시 (v2.5) — 종가 기준, 장 마감 15:20 KST.
+    진입 종목이 10/21(20)일선을 오늘 종가로 하향 이탈하면 트레일링 손절 알림.
+    +2R 이후 러너 관리용 — 종가 기준이라 장중 페이크에 안 속음."""
+    now = datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        positions = res.json().get("positions", [])
+    except Exception as e:
+        print(f"[이평이탈] 조회 실패: {e}")
+        return
+    for p in positions:
+        pid = p.get("id"); ticker = p.get("ticker")
+        if not pid or not ticker or _ma_break_fired.get(pid) == today:
+            continue
+        ma = _get_ma(ticker)
+        if not ma:
+            continue
+        name = p.get("name") or ticker
+        cur = "KRW" if _kr_code(ticker) else "USD"
+        # 10일선 먼저(더 민감), 없으면 20일선
+        broke = None
+        if ma.get("broke10"):
+            broke = ("10일선", ma.get("ma10"))
+        elif ma.get("broke20"):
+            broke = ("20일선", ma.get("ma20"))
+        if not broke:
+            continue
+        _ma_break_fired[pid] = today
+        line, maval = broke
+        send_telegram("\n".join([
+            f"📉 <b>{line} 이탈 — 트레일링 손절 검토</b>",
+            "",
+            f"종목: <b>{name}</b> ({ticker})",
+            f"종가 {format_price(ma.get('close'), cur)} < {line} {format_price(maval, cur)}",
+            "",
+            "러너 관리 규칙:",
+            "· +2R 넘겨 본전 이동한 물량이면 → 이탈 시 트레일링 청산",
+            "· 아직 초기 진입이면 → 손절가와 함께 판단",
+            "· 종가 이탈이라 장중 페이크 아님 (신뢰도 높음)",
+        ]))
+        print(f"  📉 {name} {line} 이탈")
+
+
+def check_ma_near():
+    """관찰 종목 이평 지지 접근 감시 (v2.5) — 장중 2분마다.
+    관찰(watch) 종목이 20/50일선 ±1% 안에 들어오면 '지지선 접근' 알림.
+    ※ 진입 신호 아님 — 반등일(양봉+거래량) 확인은 사용자 몫. 참고용 관찰 알림."""
+    now = datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+        pending = res.json().get("pending", [])
+    except Exception:
+        return
+    for w in pending:
+        ticker = w.get("ticker")
+        # 관찰 카테고리만 (대기=피벗 돌파 감시는 별도)
+        if not ticker or (w.get("category") or w.get("cat")) != "관찰":
+            continue
+        if _ma_near_fired.get(ticker) == today:
+            continue
+        ma = _get_ma(ticker)
+        if not ma:
+            continue
+        name = w.get("name") or ticker
+        cur = "KRW" if _kr_code(ticker) else "USD"
+        # 20일선 또는 50일선 ±1% 접근 (아직 이탈 전 = 지지 테스트)
+        near = None
+        for w_ma in (20, 50):
+            d = ma.get(f"dist{w_ma}_pct")
+            if d is not None and -1.0 <= d <= 1.5 and not ma.get(f"below{w_ma}"):
+                near = (f"{w_ma}일선", ma.get(f"ma{w_ma}"), d)
+                break
+        if not near:
+            continue
+        _ma_near_fired[ticker] = today
+        line, maval, d = near
+        send_telegram("\n".join([
+            f"🎯 <b>{line} 지지 접근 — 관찰</b>",
+            "",
+            f"종목: <b>{name}</b> ({ticker})",
+            f"현재 {format_price(ma.get('close'), cur)} · {line} {format_price(maval, cur)} ({d:+.1f}%)",
+            "",
+            "눌림목 진입 준비:",
+            "· 지지선 찍고 반등일(양봉+거래량 회복) 확인 후 진입",
+            "· 지금 사는 건 떨어지는 칼 — 반등 확인이 먼저",
+            "· 게이트 🔴면 관찰만",
+        ]))
+        print(f"  🎯 {name} {line} 접근 ({d:+.1f}%)")
+
+
 def check_pivot_breakout():
     """눌림목 스캐너의 대기(pending) 종목을 읽어, 피벗가 돌파 시 텔레그램 알림.
     스캐너 /api/watch/pending에서 {ticker, name, pivot, ...} 목록을 받아
@@ -963,6 +1074,8 @@ schedule.every(2).minutes.do(check_positions)        # 진입 포지션 R 마일
 schedule.every(30).minutes.do(check_market_gate)     # 시장 게이트 제안 변경 감시 (v2.2)
 schedule.every().day.at("11:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (v2.4)
 schedule.every().day.at("15:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (장 마감 전)
+schedule.every().day.at("15:20", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (v2.5, 종가 기준)
+schedule.every(2).minutes.do(check_ma_near)                            # 관찰 이평 접근 (v2.5, 장중)
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
