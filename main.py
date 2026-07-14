@@ -1103,9 +1103,15 @@ schedule.every(30).seconds.do(check_alerts)
 schedule.every(1).minutes.do(check_pivot_breakout)   # 대기종목 피벗 돌파 감시
 schedule.every(2).minutes.do(check_positions)        # 진입 포지션 R 마일스톤/손절 감시 (v2.1)
 schedule.every(30).minutes.do(check_market_gate)     # 시장 게이트 제안 변경 감시 (v2.2)
-schedule.every().day.at("11:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (v2.4)
-schedule.every().day.at("15:00", "Asia/Seoul").do(check_distribution)  # 분산 경고 (장 마감 전)
-schedule.every().day.at("15:20", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (v2.5, 종가 기준)
+# v2.6 [루트 수정] 분산/이평이탈은 '완성된 일봉' 기반 판정인데 장중에 돌리고 있었음.
+#   [원인] 11:00(장 시작 2h) / 15:00·15:20(종가 동시호가 15:20~15:30 전)에 실행 →
+#          스캐너 캐시가 8분마다 장중 갱신되므로 c.iloc[-1]이 '미완성 일봉'.
+#          슈피겐 사례: 11:00 스냅샷 -4.6%/0.31배로 danger 발동 → 종가는 +0.71%/0.57배.
+#          종가 데이터였으면 is_down_day=False라 신호 자체가 안 떴음.
+#   [수정] KRX 종가 확정(15:30) + 데이터 반영 여유를 두고 16:10 KST 1회만 실행.
+#          미국 종목은 이 시각 기준 직전 세션이 이미 마감이라 완성 봉으로 판정됨.
+schedule.every().day.at("16:10", "Asia/Seoul").do(check_distribution)  # 분산 경고 (종가 확정 후)
+schedule.every().day.at("16:10", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (종가 확정 후)
 schedule.every(2).minutes.do(check_ma_near)                            # 관찰 이평 접근 (v2.5, 장중)
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
