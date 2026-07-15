@@ -655,18 +655,71 @@ def check_positions():
 
 _gate_last = {"suggest": None}
 
+# ── v2.7: 게이트 캐시 + 알림 헤더 ──
+_gate_cache = {"ts": 0, "data": None}
+_GATE_CACHE_TTL = 300      # 5분. 알림마다 API 때리지 않게.
+_GATE_EMOJI = {
+    "confirmed": "🟢 확인된 상승",
+    "pressure": "🟡 조정 압박",
+    "correction": "🔴 조정",
+}
 
-def check_market_gate():
-    """시장 게이트 자동 제안 감시 (v2.2) — 30분마다.
-    제안이 바뀌는 순간(특히 FTD 발생 → 🟢) 텔레그램 알림. 게이트 전환이라는
-    가장 중요한 판단을 사람이 감정으로 하지 않게 하는 마지막 조각."""
+
+def get_gate(force=False):
+    """스캐너 /api/market/gate 조회 (5분 캐시). 실패 시 옛 캐시 또는 None."""
+    now = _time.time()
+    if not force and _gate_cache["data"] and now - _gate_cache["ts"] < _GATE_CACHE_TTL:
+        return _gate_cache["data"]
     try:
         res = requests.get(f"{SCANNER_URL}/api/market/gate", timeout=15)
         j = res.json()
         if not j.get("ok"):
-            return
+            return _gate_cache["data"]
     except Exception as e:
         print(f"[게이트] 조회 실패: {e}")
+        return _gate_cache["data"]
+    _gate_cache["ts"] = now
+    _gate_cache["data"] = j
+    return j
+
+
+def _gate_line(ticker):
+    """알림 헤더용 시장 게이트 한 줄. 종목 시장(KR/US)에 맞는 게이트 사용.
+    한국 종목 → 코스피/코스닥 중 나쁜 쪽, 미국 종목 → S&P/나스닥 중 나쁜 쪽.
+    노출 %가 아니라 오픈 리스크 상한(R)을 보여준다 (R설정에 이미 있는 규칙).
+    반환: 문자열 (실패 시 None)."""
+    j = get_gate()
+    if not j:
+        return None
+    is_kr = bool(_kr_code(ticker))
+    gate = j.get("gate_kr") if is_kr else j.get("gate_us")
+    max_r = j.get("max_open_r_kr") if is_kr else j.get("max_open_r_us")
+    if not gate:
+        return None
+    idx = j.get("indices") or {}
+    codes = ("KOSPI", "KOSDAQ") if is_kr else ("^GSPC", "^IXIC")
+    parts = []
+    for code in codes:
+        v = idx.get(code)
+        if not v:
+            continue
+        d = v.get("dist_days")
+        dtxt = "분산?" if d is None else f"분산{d}"   # None=판정불가 (0 아님)
+        parts.append(f"{v['label']} {dtxt}")
+    em = _GATE_EMOJI.get(gate, gate)
+    line = f"[시장] {em} · {' · '.join(parts)}"
+    if gate == "correction":
+        line += "\n         신규 진입 0 — 관찰만"
+    else:
+        line += f"\n         신규 오픈 리스크 상한 {max_r}R"
+    return line
+
+
+def check_market_gate():
+    """시장 게이트 자동 제안 감시 (v2.7) — 30분마다, 4개 지수.
+    제안이 바뀌는 순간(특히 FTD 발생 → 🟢) 텔레그램 알림."""
+    j = get_gate(force=True)
+    if not j:
         return
     sug = j.get("suggest")
     if not sug or sug == _gate_last["suggest"]:
@@ -676,20 +729,53 @@ def check_market_gate():
     _gate_last["suggest"] = sug
     if prev is None:
         return   # 봇 시작 직후 첫 관측은 알림 없이 기억만
-    em = {"confirmed": "🟢 확인된 상승", "pressure": "🟡 조정 압박", "correction": "🔴 조정"}
     lines = [
         "📢 <b>시장 게이트 제안 변경</b>",
         "",
-        f"{em.get(prev, prev)} → <b>{em.get(sug, sug)}</b>",
+        f"{_GATE_EMOJI.get(prev, prev)} → <b>{_GATE_EMOJI.get(sug, sug)}</b>",
         f"근거: {j.get('why', '')}",
+        "",
+        "<b>지수별</b>",
+    ]
+    idx = j.get("indices") or {}
+    for code in ("KOSPI", "KOSDAQ", "^GSPC", "^IXIC"):
+        v = idx.get(code)
+        if not v:
+            lines.append(f"· {code}: 조회 실패")
+            continue
+        d = v.get("dist_days")
+        dtxt = "판정불가(거래량없음)" if d is None else f"분산 {d}개"
+        raw = v.get("dist_raw")
+        detail = ""
+        if raw is not None and d is not None and raw != d:
+            drops = []
+            if v.get("dist_pre_ftd"):
+                drops.append(f"FTD전 {v['dist_pre_ftd']}")
+            if v.get("dist_expired"):
+                drops.append(f"5%만료 {v['dist_expired']}")
+            if drops:
+                detail = f" (원시 {raw} − {', '.join(drops)})"
+        ftd_txt = ""
+        if v.get("ftd"):
+            ftd_txt = f" · FTD {v['ftd_days_ago']}일전"
+        elif v.get("in_correction"):
+            ftd_txt = f" · 반등 {v.get('rally_day')}일차"
+        vs = v.get("vol_source")
+        vsrc = f" [거래량:{vs}]" if vs and vs != "index" else ""
+        lines.append(
+            f"· <b>{v['label']}</b> {_GATE_EMOJI.get(v['gate'], '')[:2]} "
+            f"{dtxt}{detail}{ftd_txt}{vsrc}"
+        )
+    lines += [
+        "",
+        f"한국 종목: {_GATE_EMOJI.get(j.get('gate_kr'), '?')} (상한 {j.get('max_open_r_kr')}R)",
+        f"미국 종목: {_GATE_EMOJI.get(j.get('gate_us'), '?')} (상한 {j.get('max_open_r_us')}R)",
     ]
     if j.get("ftd"):
-        lines.append("")
-        lines.append("🔔 FTD 확인 — 시험 매수 0.5R 1~2건부터. 풀사이즈 금지.")
+        lines += ["", "🔔 FTD 확인 — 시험 매수 0.5R 1~2건부터. 풀사이즈 금지."]
     cur = j.get("current")
     if cur and cur != sug:
-        lines.append("")
-        lines.append(f"현재 설정({em.get(cur, cur)})과 다름 — 스캐너 일지 탭에서 [적용] 확인하세요.")
+        lines += ["", f"현재 설정({_GATE_EMOJI.get(cur, cur)})과 다름 — 스캐너 일지 탭에서 [적용] 확인하세요."]
     send_telegram("\n".join(lines))
     print(f"[게이트] {prev} → {sug}")
 
@@ -898,7 +984,7 @@ def check_ma_near():
             continue
         _ma_near_fired[ticker] = today
         line, maval, d = near
-        send_telegram("\n".join([
+        _lines = [
             f"🎯 <b>{line} 지지 접근 — 관찰</b>",
             "",
             f"종목: <b>{name}</b> ({ticker})",
@@ -907,8 +993,11 @@ def check_ma_near():
             "눌림목 진입 준비:",
             "· 지지선 찍고 반등일(양봉+거래량 회복) 확인 후 진입",
             "· 지금 사는 건 떨어지는 칼 — 반등 확인이 먼저",
-            "· 게이트 🔴면 관찰만",
-        ]))
+        ]
+        _gl = _gate_line(ticker)          # v2.7: 게이트를 알림 안에
+        if _gl:
+            _lines = [_gl, ""] + _lines
+        send_telegram("\n".join(_lines))
         print(f"  🎯 {name} {line} 접근 ({d:+.1f}%)")
 
 
@@ -956,7 +1045,7 @@ def check_pivot_breakout():
                 name = w.get("name") or ticker
                 cur = data["currency"]
                 stop = w.get("stop")
-                send_telegram("\n".join([
+                _lines = [
                     "🎯 <b>목표가 도달 — 눌림목 진입 준비</b>",
                     "",
                     f"종목: <b>{name}</b> ({ticker})",
@@ -966,22 +1055,29 @@ def check_pivot_breakout():
                     "지지선까지 눌려 내려왔어요. 진입 규칙:",
                     "· 지지 찍고 반등일(양봉+거래량 회복) 확인 후 진입",
                     "· 지금 사는 건 떨어지는 칼 — 반등 확인 먼저",
-                    "· 게이트 🔴면 관찰만",
-                ]))
+                ]
+                _gl = _gate_line(ticker)          # v2.7
+                if _gl:
+                    _lines = [_gl, ""] + _lines
+                send_telegram("\n".join(_lines))
                 print(f"  🎯 {name} 목표가 도달 {price} ≤ {tb}")
         if wid not in _pivot_near and pivot * 0.99 <= price < pivot:
             _pivot_near.add(wid)
             name = w.get("name") or ticker
             cur = data["currency"]
-            send_telegram("\n".join([
+            _lines = [
                 "⚡ <b>피벗 접근</b> — 준비",
                 "",
                 f"종목: <b>{name}</b> ({ticker})",
                 f"현재가: <b>{format_price(price, cur)}</b> (피벗까지 {round((pivot / price - 1) * 100, 2)}%)",
                 f"피벗: {format_price(pivot, cur)}",
                 "",
-                "돌파 시 다시 알림. 게이트·거래량 미리 확인해두세요.",
-            ]))
+                "돌파 시 다시 알림. 거래량 미리 확인해두세요.",
+            ]
+            _gl = _gate_line(ticker)          # v2.7
+            if _gl:
+                _lines = [_gl, ""] + _lines
+            send_telegram("\n".join(_lines))
             print(f"  ⚡ {name} 피벗 접근 {price} → {pivot}")
         if price >= pivot:                     # 피벗 돌파!
             _pivot_fired.add(wid)
@@ -1006,8 +1102,11 @@ def check_pivot_breakout():
                 lines.append("→ 🟢면 진입 검토 · 🔴면 다음 기회")
             else:
                 lines.append("⚠️ 거래량은 HTS에서 직접 확인 (전일 동시간 대비)")
-            lines.append("시장 게이트 확인 후 진입 · 피벗 +2% 추격 금지")
+            lines.append("피벗 +2% 추격 금지")
             lines.append(f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
+            _gl = _gate_line(ticker)          # v2.7: 게이트를 알림 안에 (헤더)
+            if _gl:
+                lines = [_gl, ""] + lines
             send_telegram("\n".join(lines))
             print(f"  🚀 {name} 피벗돌파 {price} >= {pivot}")
 
