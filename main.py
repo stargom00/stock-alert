@@ -1020,50 +1020,57 @@ def check_pivot_breakout():
         return
     print(f"[{now}] 피벗 돌파 감시: {len(pending)}종목")
     _today = datetime.now(KST).strftime("%Y-%m-%d")
+
+    # ── v2.8.1 리테스트 감시 (pending 목록과 독립) ──
+    # 대기 항목은 피벗 도달 시 '진입'으로 자동 전환돼 pending에서 사라진다.
+    # pending 루프 안에서 리테스트를 보면 돌파한 종목이 바로 감시에서 빠지므로,
+    # _pivot_state(발화 기록)를 직접 순회한다. 돌파날 놓쳐도 2차 기회 알림.
+    for _wid, st in list(_pivot_state.items()):
+        if st.get("retest_fired") or st.get("fired") == _today:
+            continue
+        _tk = st.get("ticker")
+        if not _tk:
+            continue
+        try:
+            _p = float(st["pivot"])
+            _d = get_stock_data(_tk)
+            if not _d:
+                continue
+            _pr = _d["price"]
+            # 피벗 -3% ~ +1.5% 구간으로 복귀 = 리테스트 존
+            if _p * 0.97 <= _pr <= _p * 1.015:
+                st["retest_fired"] = True
+                _nm = st.get("name") or _tk
+                _cur = _d["currency"]
+                _st = st.get("stop")
+                _lines = [
+                    "🔁 <b>피벗 리테스트</b> — 2차 진입 기회",
+                    "",
+                    f"종목: <b>{_nm}</b> ({_tk})",
+                    f"현재가: <b>{format_price(_pr, _cur)}</b> · 피벗 {format_price(_p, _cur)}",
+                    f"돌파일: {st.get('fired')} (그날 진입 못 했다면 지금이 재기회)",
+                ]
+                if _st:
+                    _lines.append(f"손절: {format_price(_st, _cur)}")
+                _lines += [
+                    "",
+                    "· 피벗 위에서 지지받고 반등하면 진입 유효",
+                    "· 피벗 -3% 아래로 깨지면 리테스트 실패 — 관망",
+                ]
+                _gl = _gate_line(_tk)
+                if _gl:
+                    _lines = [_gl, ""] + _lines
+                send_telegram("\n".join(_lines))
+                print(f"  🔁 {_nm} 리테스트 {_pr} ~ 피벗 {_p}")
+        except Exception as _e:
+            print(f"  리테스트 체크 오류 {_tk}: {_e}")
+
     for w in pending:
         wid = w.get("id")
         ticker = w.get("ticker")
         pivot = w.get("pivot")
         if not ticker or not pivot:
             continue
-
-        # ── v2.8 리테스트 감시 ──
-        # 이전에 돌파 알림이 나갔던 종목이 피벗 근처로 되돌아오면 = 리테스트.
-        # 돌파날 진입 못 했어도 2차 진입 기회. (돌파날 놓침 = 끝이 아니게)
-        st = _pivot_state.get(wid)
-        if st and not st.get("retest_fired") and st.get("fired") != _today:
-            try:
-                _p = float(st["pivot"])
-                _d = get_stock_data(ticker)
-                if _d:
-                    _pr = _d["price"]
-                    # 피벗 위 +1.5% ~ 피벗 아래 -3% 구간으로 복귀 = 리테스트 존
-                    if _p * 0.97 <= _pr <= _p * 1.015:
-                        st["retest_fired"] = True
-                        name = w.get("name") or ticker
-                        cur = _d["currency"]
-                        stop = w.get("stop")
-                        _lines = [
-                            "🔁 <b>피벗 리테스트</b> — 2차 진입 기회",
-                            "",
-                            f"종목: <b>{name}</b> ({ticker})",
-                            f"현재가: <b>{format_price(_pr, cur)}</b> · 피벗 {format_price(_p, cur)}",
-                            f"돌파일: {st.get('fired')} (그날 진입 못 했다면 지금이 재기회)",
-                        ]
-                        if stop:
-                            _lines.append(f"손절: {format_price(stop, cur)}")
-                        _lines += [
-                            "",
-                            "· 피벗 위에서 지지받고 반등하면 진입 유효",
-                            "· 피벗 -3% 아래로 깨지면 리테스트 실패 — 관망",
-                        ]
-                        _gl = _gate_line(ticker)
-                        if _gl:
-                            _lines = [_gl, ""] + _lines
-                        send_telegram("\n".join(_lines))
-                        print(f"  🔁 {name} 리테스트 {_pr} ~ 피벗 {_p}")
-            except Exception as _e:
-                print(f"  리테스트 체크 오류 {ticker}: {_e}")
 
         # v2.8: 날짜 기반 중복 방지 — 같은 날 1회. 다음날 재돌파면 다시 알림.
         # (기존 영구 set은 한번 알림 후 재돌파를 봇 재시작 전까지 영원히 무시)
@@ -1128,7 +1135,9 @@ def check_pivot_breakout():
         if price >= pivot:                     # 피벗 돌파!
             _pivot_fired[wid] = _today
             # v2.8: 리테스트 감시 시작 (같은 날은 리테스트 판정 안 함)
-            _pivot_state[wid] = {"pivot": float(pivot), "fired": _today, "retest_fired": False}
+            _pivot_state[wid] = {"pivot": float(pivot), "fired": _today, "retest_fired": False,
+                                 "ticker": ticker, "name": w.get("name") or ticker,
+                                 "stop": w.get("stop")}
             name = w.get("name") or ticker
             entry = w.get("entry")
             stop = w.get("stop")
