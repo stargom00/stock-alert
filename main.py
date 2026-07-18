@@ -15,7 +15,11 @@ MORNING_TICKERS = os.environ.get("MORNING_TICKERS", "")  # 아침 요약 종목 
 SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기준 % (기본 5%)
 # 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
 SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
-_pivot_fired = set()   # 이미 돌파 알림 보낸 종목 id (중복 방지)
+_pivot_fired = {}      # v2.8: {종목id: "YYYY-MM-DD"} — 하루 1회. 날짜 바뀌면 재돌파 알림 가능
+                       # (기존 영구 set은 한번 알림 후 봇 재시작 전까지 재돌파를 영원히 무시했음)
+_pivot_state = {}      # v2.8: {종목id: {"pivot": float, "fired": "date", "retest_fired": bool}}
+                       # 돌파 알림 후 리테스트(피벗 되돌림) 감시용.
+                       # ⚠️ 메모리 저장 — 봇 재배포 시 리셋됨 (봇에 영구볼륨 없음, 선언된 한계)
 _target_fired = set()  # 하향 목표가 도달 알림 보낸 종목 id (v2.6)
 
 def parse_alerts():
@@ -1015,13 +1019,55 @@ def check_pivot_breakout():
     if not pending:
         return
     print(f"[{now}] 피벗 돌파 감시: {len(pending)}종목")
+    _today = datetime.now(KST).strftime("%Y-%m-%d")
     for w in pending:
         wid = w.get("id")
-        if wid in _pivot_fired:
-            continue
         ticker = w.get("ticker")
         pivot = w.get("pivot")
         if not ticker or not pivot:
+            continue
+
+        # ── v2.8 리테스트 감시 ──
+        # 이전에 돌파 알림이 나갔던 종목이 피벗 근처로 되돌아오면 = 리테스트.
+        # 돌파날 진입 못 했어도 2차 진입 기회. (돌파날 놓침 = 끝이 아니게)
+        st = _pivot_state.get(wid)
+        if st and not st.get("retest_fired") and st.get("fired") != _today:
+            try:
+                _p = float(st["pivot"])
+                _d = get_stock_data(ticker)
+                if _d:
+                    _pr = _d["price"]
+                    # 피벗 위 +1.5% ~ 피벗 아래 -3% 구간으로 복귀 = 리테스트 존
+                    if _p * 0.97 <= _pr <= _p * 1.015:
+                        st["retest_fired"] = True
+                        name = w.get("name") or ticker
+                        cur = _d["currency"]
+                        stop = w.get("stop")
+                        _lines = [
+                            "🔁 <b>피벗 리테스트</b> — 2차 진입 기회",
+                            "",
+                            f"종목: <b>{name}</b> ({ticker})",
+                            f"현재가: <b>{format_price(_pr, cur)}</b> · 피벗 {format_price(_p, cur)}",
+                            f"돌파일: {st.get('fired')} (그날 진입 못 했다면 지금이 재기회)",
+                        ]
+                        if stop:
+                            _lines.append(f"손절: {format_price(stop, cur)}")
+                        _lines += [
+                            "",
+                            "· 피벗 위에서 지지받고 반등하면 진입 유효",
+                            "· 피벗 -3% 아래로 깨지면 리테스트 실패 — 관망",
+                        ]
+                        _gl = _gate_line(ticker)
+                        if _gl:
+                            _lines = [_gl, ""] + _lines
+                        send_telegram("\n".join(_lines))
+                        print(f"  🔁 {name} 리테스트 {_pr} ~ 피벗 {_p}")
+            except Exception as _e:
+                print(f"  리테스트 체크 오류 {ticker}: {_e}")
+
+        # v2.8: 날짜 기반 중복 방지 — 같은 날 1회. 다음날 재돌파면 다시 알림.
+        # (기존 영구 set은 한번 알림 후 재돌파를 봇 재시작 전까지 영원히 무시)
+        if _pivot_fired.get(wid) == _today:
             continue
         data = get_stock_data(ticker)
         if not data:
@@ -1080,7 +1126,9 @@ def check_pivot_breakout():
             send_telegram("\n".join(_lines))
             print(f"  ⚡ {name} 피벗 접근 {price} → {pivot}")
         if price >= pivot:                     # 피벗 돌파!
-            _pivot_fired.add(wid)
+            _pivot_fired[wid] = _today
+            # v2.8: 리테스트 감시 시작 (같은 날은 리테스트 판정 안 함)
+            _pivot_state[wid] = {"pivot": float(pivot), "fired": _today, "retest_fired": False}
             name = w.get("name") or ticker
             entry = w.get("entry")
             stop = w.get("stop")
@@ -1094,6 +1142,16 @@ def check_pivot_breakout():
             ]
             if stop:
                 lines.append(f"손절: {format_price(stop, cur)}")
+                # ── v2.8: 손절폭 즉시 판정 — 알림 하나로 진입 판단 끝나게 ──
+                try:
+                    _sw = (float(pivot) - float(stop)) / float(pivot) * 100
+                    _lim = 7.0 if _kr_code(ticker) else 5.0
+                    if _sw > _lim:
+                        lines.append(f"🚫 손절폭 {_sw:.1f}% (기준 {_lim:.0f}% 초과) — 이 자리 진입 비권장. 눌림 대기")
+                    else:
+                        lines.append(f"✅ 손절폭 {_sw:.1f}% (기준 {_lim:.0f}% 이내)")
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
             # 거래량 확증 (v2.3): 실시간 누적 거래량 시간보정 → 예상 거래량비
             vtag, vok = volume_confirm(ticker, data.get("volume"), datetime.now(KST))
             lines.append("")
@@ -1162,6 +1220,93 @@ def check_surge():
             # ✅ 급등락 구간 벗어나면 초기화 (재진입 감지용)
             prev_prices.pop(ticker, None)
 
+def watch_digest():
+    """v2.8 데일리 관찰 다이제스트 — 매 거래일 08:50 KST.
+
+    [배경] Seulki의 반복 패턴: 스캐너에서 종목 발견 → 다음날 새 종목에 정신
+    팔려 기존 관찰을 잊음 → 돌파 놓침 → 그 종목은 상승 추세를 탐.
+    '다음날 다시 체크'를 사람이 아니라 봇이 매일 아침 하게 만든다.
+
+    내용: 대기 종목 전체를 피벗 근접순으로 + 셋업 깨진 것(가격<손절) 정리 제안
+    + 2주 넘게 트리거 없는 것 만료 제안. 관찰 목록을 항상 짧고 살아있게.
+    """
+    now = datetime.now(KST)
+    if now.weekday() >= 5:      # 주말 스킵
+        return
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=15)
+        pending = res.json().get("pending", [])
+    except Exception as e:
+        print(f"[다이제스트] 조회 실패: {e}")
+        return
+    if not pending:
+        return
+
+    near, waiting, broken, stale = [], [], [], []
+    today = now.date()
+    for w in pending:
+        ticker = w.get("ticker")
+        pivot = w.get("pivot")
+        if not ticker or not pivot:
+            continue
+        d = get_stock_data(ticker)
+        if not d:
+            waiting.append((w, None, None))
+            continue
+        price = d["price"]
+        cur = d["currency"]
+        try:
+            dist = (float(pivot) - price) / price * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        stop = w.get("stop")
+        # D: 셋업 무효 — 가격이 손절선 아래 = 대기 셋업 붕괴
+        try:
+            if stop and price < float(stop):
+                broken.append((w, price, cur))
+                continue
+        except (TypeError, ValueError):
+            pass
+        # D: 만료 제안 — 등록 후 14일 넘게 트리거 없음
+        try:
+            reg = datetime.strptime(w.get("date", ""), "%Y-%m-%d").date()
+            if (today - reg).days > 14:
+                stale.append((w, dist, cur))
+                continue
+        except (TypeError, ValueError):
+            pass
+        if 0 <= dist <= 3.0:
+            near.append((w, dist, cur, price))
+        else:
+            waiting.append((w, dist, cur))
+
+    near.sort(key=lambda x: x[1])
+    lines = ["📋 <b>아침 관찰 다이제스트</b>", ""]
+    if near:
+        lines.append("🎯 <b>임박 (피벗 3% 이내)</b> — 오늘 볼 것")
+        for w, dist, cur, price in near:
+            lines.append(f"· <b>{w.get('name')}</b> 피벗까지 +{dist:.1f}% "
+                         f"(현재 {format_price(price, cur)} → {format_price(w.get('pivot'), cur)})")
+        lines.append("")
+    if waiting:
+        lines.append(f"⏳ 대기 {len(waiting)}종목: "
+                     + " · ".join(f"{w.get('name')}({dist:+.1f}%)" if dist is not None else f"{w.get('name')}(?)"
+                                  for w, dist, cur in waiting[:8]))
+        lines.append("")
+    if broken:
+        lines.append("💔 <b>셋업 무효 — 정리 권장</b> (가격이 손절선 아래)")
+        for w, price, cur in broken:
+            lines.append(f"· {w.get('name')} 현재 {format_price(price, cur)} < 손절 {format_price(w.get('stop'), cur)}")
+        lines.append("  → 일지에서 '무산' 처리하세요. 죽은 항목이 쌓이면 목록을 안 보게 됩니다.")
+        lines.append("")
+    if stale:
+        lines.append(f"🗓 14일+ 무반응 {len(stale)}종목: "
+                     + " · ".join(w.get('name') for w, _, _ in stale[:6])
+                     + " — 셋업 재검토/정리 권장")
+    send_telegram("\n".join(lines).rstrip())
+    print(f"[다이제스트] 임박{len(near)} 대기{len(waiting)} 무효{len(broken)} 만료{len(stale)}")
+
+
 def morning_summary():
     """아침 9시 요약"""
     if not MORNING_TICKERS:
@@ -1215,6 +1360,7 @@ schedule.every(2).minutes.do(check_ma_near)                            # 관찰 
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
+schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아침 관찰 다이제스트
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 
 check_alerts()
