@@ -1,6 +1,20 @@
-# 얼마냐봇 v2.7 — 알림에 시장 게이트 삽입
+# 얼마냐봇 v2.9 — 미국 종목 거래량 확증 지원
 
-## 선행 조건
+## v2.9 변경
+피벗 돌파 알림의 "거래량 확증"(volume_confirm)이 한국 종목에서만 동작하고
+미국 종목은 항상 "⚠️ 거래량은 HTS에서 직접 확인"으로 빠졌던 문제 수정.
+- 원인 ①: `_get_stock_data_yahoo`가 당일 누적 거래량(volume) 필드를 아예
+  안 돌려줘서 `cur_volume`이 항상 None.
+- 원인 ②: `volume_confirm`이 `_kr_code(ticker)`가 있어야만(=한국 종목만)
+  동작하는 구조라, 그 이후 로직(스캐너 조회, 세션 경과비율 계산)이 전부
+  한국 전용이었음.
+- 해결: 야후 차트 API의 `regularMarketVolume`(당일 누적 거래량, 실측 확인함)
+  을 volume 필드로 추가. `volume_confirm`은 한국/미국을 분기해 스캐너 조회
+  (`/api/vol/{ticker}` 그대로 vs `/api/vol/{code}.KQ`/`.KS`) 및 세션 경과비율
+  (`_session_elapsed_ratio_us`: 22:30~05:00 KST 미국장, 자정 넘어가는 세션 보정)
+  을 각각 계산하도록 수정.
+
+## 선행 조건 (v2.7 — 아래는 과거 작업 이력)
 **스캐너 v4.57 배포가 먼저.** `/api/market/gate` 응답 구조가 바뀌므로,
 봇만 먼저 올리면 `gate_kr` / `gate_us` / `max_open_r_kr` 필드가 없어 헤더가 안 뜸
 (에러는 안 나고 조용히 스킵됨).

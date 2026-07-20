@@ -216,6 +216,7 @@ def _get_stock_data_yahoo(ticker):
             "change_pct": change_pct,
             "week52_high": week52_high,
             "week52_low": week52_low,
+            "volume": float(meta.get("regularMarketVolume") or 0),  # 당일 누적 거래량 (v2.9)
         }
     except Exception as e:
         print(f"[오류] {ticker} 조회 실패: {e}")
@@ -544,26 +545,53 @@ def _session_elapsed_ratio(now_kst):
     return (cur_min - open_min) / (close_min - open_min)
 
 
+def _session_elapsed_ratio_us(now_kst):
+    """미국장(22:30~05:00 KST, 6.5h) 경과 비율. 자정을 넘어가는 세션이라
+    KST 00:00~06:00은 '전날 22:30부터 이어진 시간'으로 취급해 분 단위를 24h+로 보정."""
+    open_min, close_min = 22 * 60 + 30, 24 * 60 + 5 * 60
+    cur_min = now_kst.hour * 60 + now_kst.minute
+    if cur_min < 6 * 60:
+        cur_min += 24 * 60
+    if cur_min <= open_min:
+        return 0.01
+    if cur_min >= close_min:
+        return 1.0
+    return (cur_min - open_min) / (close_min - open_min)
+
+
 def volume_confirm(ticker, cur_volume, now_kst):
     """돌파 거래량 확증 (v2.3): 실시간 누적 거래량을 시간보정해 예상 종가
-    거래량비 계산. 평균은 스캐너 /api/vol에서. 반환 (표시문자열, 신뢰여부)."""
-    code = _kr_code(ticker)
-    if not code or not cur_volume:
+    거래량비 계산. 평균은 스캐너 /api/vol에서. 반환 (표시문자열, 신뢰여부).
+
+    v2.9: 한국 전용이던 걸 미국 종목도 지원. 원인은 두 가지였음 —
+    (1) _get_stock_data_yahoo가 애초에 실시간 누적 거래량(volume)을 안 돌려줘서
+        cur_volume가 항상 None → 이 함수 진입 자체를 못 함.
+    (2) code = _kr_code(ticker)가 미국 티커에선 항상 None이라, 그 이후 로직이
+        전부 한국 전용(코드 있어야 스캐너 조회, 한국장 시간으로 경과비율 계산)
+        구조였음. 미국은 스캐너에 티커 그대로(.KQ/.KS 없이) 조회하고, 경과비율도
+        미국장 시간(22:30~05:00 KST) 기준으로 따로 계산하게 분기."""
+    if not cur_volume:
         return None, False
+    code = _kr_code(ticker)
     try:
-        res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8)
-        j = res.json()
-        if not j.get("ok"):
-            res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KS", timeout=8)
+        if code:
+            res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8)
+            j = res.json()
+            if not j.get("ok"):
+                res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KS", timeout=8)
+                j = res.json()
+        else:
+            res = requests.get(f"{SCANNER_URL}/api/vol/{ticker.upper()}", timeout=8)
             j = res.json()
         avg = j.get("avg_volume_50") or 0
     except Exception:
         return None, False
     if not avg:
         return None, False
-    ratio = (cur_volume / _session_elapsed_ratio(now_kst)) / avg
+    session_ratio = _session_elapsed_ratio(now_kst) if code else _session_elapsed_ratio_us(now_kst)
+    ratio = (cur_volume / session_ratio) / avg
     pct = int(ratio * 100)
-    early = (now_kst.hour == 9 and now_kst.minute < 30)
+    early = session_ratio <= 0.05
     if ratio >= 1.5:
         tag = f"🟢 거래량 확증 (예상 {pct}%)"
     elif ratio >= 1.0:
