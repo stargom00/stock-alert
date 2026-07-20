@@ -1194,7 +1194,6 @@ def check_pivot_breakout():
             lines.append("")
             if vok:
                 lines.append(vtag)
-                lines.append("→ 🟢면 진입 검토 · 🔴면 다음 기회")
             else:
                 lines.append("⚠️ 거래량은 HTS에서 직접 확인 (전일 동시간 대비)")
             lines.append("피벗 +2% 추격 금지")
