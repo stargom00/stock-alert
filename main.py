@@ -535,28 +535,38 @@ def handle_message(text, chat_id):
         )
 
 def _session_elapsed_ratio(now_kst):
-    """한국장(09:00~15:30, 6.5h) 경과 비율. 장외면 1.0(종가 확정)."""
+    """한국장(09:00~15:30, 6.5h) 경과 비율. 장외(장 시작 전 포함)면 1.0(종가 확정).
+
+    v2.11 버그수정: 원래 코드는 `cur_min <= open_min`(09:00 이하 전부)일 때
+    0.01을 반환했음 — 이건 "막 개장한 순간"의 0나눗 방지용인데, 자정(00:00)부터
+    새벽까지도 전부 이 조건에 걸려서 같은 0.01이 나왔음. 자정엔 실제로는 어제
+    장이 끝난 지 한참 지나 거래량이 그날 최종치로 멈춰있는 상태인데, 이걸 "1%만
+    지났다"고 계산해 100배 가까이 부풀림 → 실거래량 부족한 종목이 "거래량 확증
+    (예상 1000%+)"로 잘못 뜨는 사고 발생(안국약품/엘티씨, 2026-07-22 00:00 KST).
+    장 시작 전(자정~09:00)과 장 마감 후를 구분 없이 전부 '장외 = 1.0'으로
+    통일하고, 개장 직후 0나눗 방지만 elapsed에 최소값(0.01)으로 처리."""
     open_min, close_min = 9 * 60, 15 * 60 + 30
     cur_min = now_kst.hour * 60 + now_kst.minute
-    if cur_min <= open_min:
-        return 0.01
-    if cur_min >= close_min:
+    if cur_min < open_min or cur_min >= close_min:
         return 1.0
-    return (cur_min - open_min) / (close_min - open_min)
+    return max(0.01, (cur_min - open_min) / (close_min - open_min))
 
 
 def _session_elapsed_ratio_us(now_kst):
     """미국장(22:30~05:00 KST, 6.5h) 경과 비율. 자정을 넘어가는 세션이라
-    KST 00:00~06:00은 '전날 22:30부터 이어진 시간'으로 취급해 분 단위를 24h+로 보정."""
+    KST 00:00~06:00은 '전날 22:30부터 이어진 시간'으로 취급해 분 단위를 24h+로 보정.
+
+    v2.11 버그수정: 한국장 버전과 같은 종류의 버그 — 개장 전 전부를 0.01로
+    처리해서, 낮 시간대(예: 오전 10시, 미국장은 새벽 5시에 이미 마감해 몇 시간째
+    닫혀있는 상태)도 "막 개장한 순간"과 똑같이 0.01로 계산돼 거래량이 크게
+    부풀려짐. 장외(개장 전 포함)는 전부 1.0으로 통일."""
     open_min, close_min = 22 * 60 + 30, 24 * 60 + 5 * 60
     cur_min = now_kst.hour * 60 + now_kst.minute
     if cur_min < 6 * 60:
         cur_min += 24 * 60
-    if cur_min <= open_min:
-        return 0.01
-    if cur_min >= close_min:
+    if cur_min < open_min or cur_min >= close_min:
         return 1.0
-    return (cur_min - open_min) / (close_min - open_min)
+    return max(0.01, (cur_min - open_min) / (close_min - open_min))
 
 
 def volume_confirm(ticker, cur_volume, now_kst):
