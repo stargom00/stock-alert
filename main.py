@@ -1266,6 +1266,53 @@ def check_alerts():
                    f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
             send_telegram(msg)
 
+_opening_surge_fired_date = None   # 오늘 이미 발송했는지 (같은 날 중복 방지)
+
+
+def check_opening_surge():
+    """장 시작 10분 돈 유입(거래량 급증) 알림 (v2.13) — 09:10 KST 1회.
+    스캐너 /api/opening-surge를 호출해 유니버스 전체 중 평소 대비 거래량이
+    급증(기본 3배↑)한 종목만 텔레그램으로 보낸다. 주말은 스킵.
+    스케줄러가 09:10에 정확히 안 맞아 여러 번 걸릴 수 있어 날짜별 1회만 발송."""
+    global _opening_surge_fired_date
+    now = datetime.now(KST)
+    if now.weekday() >= 5:
+        print("[장초반 급증] 주말이라 건너뜀")
+        return
+    today = now.strftime("%Y-%m-%d")
+    if _opening_surge_fired_date == today:
+        return
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/opening-surge", timeout=60)
+        j = res.json()
+        hits = j.get("hits", [])
+    except Exception as e:
+        print(f"[장초반 급증] 조회 실패: {e}")
+        return
+    _opening_surge_fired_date = today
+    if not hits:
+        print("[장초반 급증] 급증 종목 없음")
+        return
+    lines = [
+        "💸 <b>장 시작 10분 — 돈 유입 급증 종목</b>",
+        "",
+        "평소(50일 평균) 대비 거래량이 시간보정 기준 3배 이상인 종목이에요.",
+        "",
+    ]
+    for h in hits[:10]:
+        lines.append(
+            f"· <b>{h['name']}</b> ({h['ticker']}) {h['change_pct']:+.1f}% "
+            f"· 평소대비 <b>{h['surge_ratio']}배</b> · 거래대금 {h['value_eok']:,.0f}억"
+        )
+    lines += [
+        "",
+        "※ 진입 신호 아님 — 왜 돈이 몰렸는지(뉴스/공시) 확인 후 판단하세요.",
+        f"시각: {now.strftime('%H:%M')}",
+    ]
+    send_telegram("\n".join(lines))
+    print(f"  💸 장초반 급증 {len(hits)}종목 발송")
+
+
 def check_surge():
     """급등락 감지"""
     tickers = [a["ticker"] for a in alerts]
@@ -1436,6 +1483,7 @@ schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
 schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아침 관찰 다이제스트
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
+schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
 
 check_alerts()
 
