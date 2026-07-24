@@ -615,12 +615,19 @@ def volume_confirm(ticker, cur_volume, now_kst):
 
 _pivot_near = set()      # 접근 예고 발송 기록
 _pos_fired = {}          # {포지션id: {'stop', '2R', '3R', ...}} 발송 기록 (재시작 시 초기화)
+_pos_last_price = {}     # {포지션id: 직전 폴링(2분 전) 가격} — 급락 감지용 (v2.12)
+_flash_fired = {}        # {포지션id: 마지막 급락 알림 시각} — 같은 하락에 반복 알림 방지 (재시작 시 초기화)
+FLASH_DROP_PCT = -5.0    # 진입 종목이 폴링 주기(2분) 사이 이 이상 빠지면 급락 알림
+FLASH_COOLDOWN_MIN = 10  # 종목당 재알림 쿨다운(분)
 
 
 def check_positions():
     """진입중 포지션의 R 진행률 감시 (v2.1) — 2분마다.
     +2R: 절반 익절 + 손절 본전 이동 안내 / +3R 이상: 마일스톤 / 손절가 터치: 실행 알림.
-    각 이벤트는 포지션당 1회만."""
+    각 이벤트는 포지션당 1회만.
+    v2.12: 폴링 주기(2분) 사이 -5% 이상 급락하면 별도 급락 알림(반복 쿨다운 10분).
+    R마일스톤과 달리 "짧은 시간 급변"이 신호라 며칠에 걸친 하락과는 구분해야 해서
+    직전 폴링 가격(_pos_last_price)과만 비교한다 — entry/stop 대비가 아님."""
     now = datetime.now(KST).strftime("%H:%M:%S")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
@@ -645,6 +652,27 @@ def check_positions():
         name = p.get("name") or ticker
         fired = _pos_fired.setdefault(pid, set())
         r_now = (price - entry) / (entry - stop)
+
+        # 🔻 급락 감지 (v2.12): 직전 폴링(2분 전) 대비 -5% 이상 하락.
+        prev_price = _pos_last_price.get(pid)
+        _pos_last_price[pid] = price
+        if prev_price and prev_price > 0:
+            drop_pct = (price - prev_price) / prev_price * 100
+            if drop_pct <= FLASH_DROP_PCT:
+                last_fire = _flash_fired.get(pid)
+                now_dt = datetime.now(KST)
+                if not last_fire or (now_dt - last_fire).total_seconds() >= FLASH_COOLDOWN_MIN * 60:
+                    _flash_fired[pid] = now_dt
+                    send_telegram("\n".join([
+                        "🔻 <b>급락 감지</b>",
+                        "",
+                        f"종목: <b>{name}</b> ({ticker})",
+                        f"{format_price(prev_price, cur)} → <b>{format_price(price, cur)}</b> ({round(drop_pct, 1)}%, 2분 폴링 기준)",
+                        f"현재 {round(r_now, 2)}R",
+                        "",
+                        "뉴스/공시 확인 후 대응하세요. 셋업 붕괴면 손절가 전이라도 이탈 검토.",
+                    ]))
+                    print(f"  🔻 {name} 급락 {round(drop_pct, 1)}% ({prev_price}→{price})")
 
         # 🛑 손절가 터치
         if price <= stop and "stop" not in fired:
