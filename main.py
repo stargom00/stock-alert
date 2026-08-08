@@ -4,9 +4,15 @@ import time
 import re
 import requests
 import schedule
+import pytz
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
+# v2.15: US 장시간 판정용 — 서머타임 자동 반영(고정 오프셋이 아니라
+# 실제 타임존이라 EST/EDT 전환을 pytz가 알아서 처리). NZ는 사용자 표시용
+# 시간 병기에만 씀(NZST/NZDT 자동 전환).
+ET = pytz.timezone("America/New_York")
+NZ_TZ = pytz.timezone("Pacific/Auckland")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -15,8 +21,50 @@ MORNING_TICKERS = os.environ.get("MORNING_TICKERS", "")  # 아침 요약 종목 
 SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기준 % (기본 5%)
 # 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
 SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
-_pivot_fired = {}      # v2.8: {종목id: "YYYY-MM-DD"} — 하루 1회. 날짜 바뀌면 재돌파 알림 가능
-                       # (기존 영구 set은 한번 알림 후 봇 재시작 전까지 재돌파를 영원히 무시했음)
+
+
+def _kr_market_open(now_kst=None):
+    """지금 국장이 정규장(평일 09:00~15:30 KST)인지. v2.15."""
+    now = now_kst or datetime.now(KST)
+    if now.weekday() >= 5:   # 5=토, 6=일
+        return False
+    hm = now.hour * 60 + now.minute
+    return 9 * 60 <= hm < 15 * 60 + 30
+
+
+def _us_market_open(now_kst=None):
+    """지금 미장이 정규장(평일 09:30~16:00 ET)인지 — ET로 변환 후 판정해서
+    서머타임과 요일 경계(KST 기준 토요일이어도 ET로는 아직 금요일 낮일 수
+    있음)를 동시에 정확히 처리. v2.15."""
+    now_et = (now_kst or datetime.now(KST)).astimezone(ET)
+    if now_et.weekday() >= 5:
+        return False
+    hm = now_et.hour * 60 + now_et.minute
+    return 9 * 60 + 30 <= hm < 16 * 60
+
+
+def _fmt_time_dual(now_kst=None, with_date=False, with_seconds=False):
+    """메시지에 넣는 시각 — KST와 NZT(자동 서머타임 반영) 병기. v2.15
+    (사용자가 뉴질랜드 거주, 기존엔 KST 단독 표기라 시차 계산이 매번 필요했음)."""
+    now_kst = now_kst or datetime.now(KST)
+    now_nz = now_kst.astimezone(NZ_TZ)
+    if with_seconds:
+        fmt_full = "%Y-%m-%d %H:%M:%S" if with_date else "%H:%M:%S"
+    else:
+        fmt_full = "%Y-%m-%d %H:%M" if with_date else "%H:%M"
+    return f"{now_kst.strftime(fmt_full)} KST ({now_nz.strftime(fmt_full)} {now_nz.tzname()})"
+
+
+# v2.15: 옛 _pivot_fired({종목id: "YYYY-MM-DD"} 날짜 키, 하루 1회 방식)는 폐기.
+# 자정에 날짜 문자열이 바뀌면 그 전날 이미 피벗 위였던 종목 전원이 "아직 오늘자
+# 기록 없음"으로 보여 재알림되는 버그(2026-08-09 00:00 KST CXW/RCUS/TWLO/340570
+# 동시 알림 사고)가 있었음. 아래 _pivot_above 상태전환 방식으로 교체.
+_pivot_above = {}      # v2.15: {종목id: bool} — 마지막으로 확인했을 때 피벗 위였는지.
+                       # 위→아래→위로 "다시 올라올 때만" 알림(날짜 무관, 진짜 재돌파만 포착).
+                       # 종목을 처음 보는 시점(감시 시작 or 봇 재시작 직후)은 상태만 기록하고
+                       # 알림은 안 보냄 — 재시작 직후 이미 피벗 위인 종목 전체가 "신규 돌파"로
+                       # 오인되는 걸 방지(이전 _pivot_fired 방식은 이 문제도 있었음: 재시작하면
+                       # dict가 비어서 다음 폴링에 전원 재알림).
 _pivot_state = {}      # v2.8: {종목id: {"pivot": float, "fired": "date", "retest_fired": bool}}
                        # 돌파 알림 후 리테스트(피벗 되돌림) 감시용.
                        # ⚠️ 메모리 저장 — 봇 재배포 시 리셋됨 (봇에 영구볼륨 없음, 선언된 한계)
@@ -488,7 +536,7 @@ def handle_message(text, chat_id):
                 f"🪙 <b>{ticker}</b> 현재가\n"
                 f"${data['price']:,.2f} (USD)\n"
                 f"{emoji} 24시간 등락: {data['change_pct']:+.2f}%\n"
-                f"조회 시각: {datetime.now(KST).strftime('%H:%M:%S')}",
+                f"조회 시각: {_fmt_time_dual(with_seconds=True)}",
                 chat_id
             )
             return
@@ -513,7 +561,7 @@ def handle_message(text, chat_id):
             f"현재가: {price_str}\n"
             f"52주 최고: {format_price(data['week52_high'], data['currency'])}\n"
             f"52주 최저: {format_price(data['week52_low'], data['currency'])}\n"
-            f"조회 시각: {datetime.now(KST).strftime('%H:%M:%S')}",
+            f"조회 시각: {_fmt_time_dual(with_seconds=True)}",
             chat_id
         )
     elif command == "등락":
@@ -522,7 +570,7 @@ def handle_message(text, chat_id):
             f"현재가: {price_str}\n"
             f"전일 종가: {format_price(data['prev_close'], data['currency'])}\n"
             f"등락: {data['change']:+.2f} ({data['change_pct']:+.2f}%)\n"
-            f"조회 시각: {datetime.now(KST).strftime('%H:%M:%S')}",
+            f"조회 시각: {_fmt_time_dual(with_seconds=True)}",
             chat_id
         )
     else:
@@ -530,43 +578,47 @@ def handle_message(text, chat_id):
             f"📈 <b>{ticker}</b> 현재가\n"
             f"{price_str} ({data['currency']})\n"
             f"{emoji} {data['change_pct']:+.2f}% (오늘)\n"
-            f"조회 시각: {datetime.now(KST).strftime('%H:%M:%S')}",
+            f"조회 시각: {_fmt_time_dual(with_seconds=True)}",
             chat_id
         )
 
-def _session_elapsed_ratio(now_kst):
-    """한국장(09:00~15:30, 6.5h) 경과 비율. 장외(장 시작 전 포함)면 1.0(종가 확정).
+MIN_SESSION_ELAPSED = 0.05   # 개장 후 이 미만(한국장 약 20분)이면 표본이 너무 적어 예상치 자체를 안 냄
 
-    v2.11 버그수정: 원래 코드는 `cur_min <= open_min`(09:00 이하 전부)일 때
-    0.01을 반환했음 — 이건 "막 개장한 순간"의 0나눗 방지용인데, 자정(00:00)부터
-    새벽까지도 전부 이 조건에 걸려서 같은 0.01이 나왔음. 자정엔 실제로는 어제
-    장이 끝난 지 한참 지나 거래량이 그날 최종치로 멈춰있는 상태인데, 이걸 "1%만
-    지났다"고 계산해 100배 가까이 부풀림 → 실거래량 부족한 종목이 "거래량 확증
-    (예상 1000%+)"로 잘못 뜨는 사고 발생(안국약품/엘티씨, 2026-07-22 00:00 KST).
-    장 시작 전(자정~09:00)과 장 마감 후를 구분 없이 전부 '장외 = 1.0'으로
-    통일하고, 개장 직후 0나눗 방지만 elapsed에 최소값(0.01)으로 처리."""
+
+def _session_elapsed_ratio(now_kst):
+    """한국장(09:00~15:30, 6.5h) 경과 비율. 장외/주말/개장 직후면 None(판정 불가).
+
+    v2.11: 시:분만 보고 자정~새벽을 "막 개장한 순간"으로 오판(0.01)해 거래량을
+    100배 가까이 부풀리던 버그를 고쳤었음(안국약품/엘티씨, 2026-07-22 00:00 KST).
+    v2.15: 그 수정에 **요일 체크가 빠져있었음** — 시:분 조건만으론 주말에도
+    평일과 같은 시:분이면 "장중"으로 계산됨. 반환값 의미도 바꿈: 예전엔
+    "장외=1.0"(그 값 그대로 나눠 "확정치로 취급")이었는데, 이제 장외/개장
+    직후는 아예 None을 반환해 volume_confirm이 "판정 불가"로 명확히 표시하게
+    한다(과거 값을 그대로 밀어붙이는 대신 "모른다"고 정직하게 답함)."""
+    if not _kr_market_open(now_kst):
+        return None
     open_min, close_min = 9 * 60, 15 * 60 + 30
     cur_min = now_kst.hour * 60 + now_kst.minute
-    if cur_min < open_min or cur_min >= close_min:
-        return 1.0
-    return max(0.01, (cur_min - open_min) / (close_min - open_min))
+    ratio = (cur_min - open_min) / (close_min - open_min)
+    return ratio if ratio >= MIN_SESSION_ELAPSED else None
 
 
 def _session_elapsed_ratio_us(now_kst):
-    """미국장(22:30~05:00 KST, 6.5h) 경과 비율. 자정을 넘어가는 세션이라
-    KST 00:00~06:00은 '전날 22:30부터 이어진 시간'으로 취급해 분 단위를 24h+로 보정.
+    """미국장(09:30~16:00 ET, 6.5h) 경과 비율. 장외/주말/개장 직후면 None.
 
-    v2.11 버그수정: 한국장 버전과 같은 종류의 버그 — 개장 전 전부를 0.01로
-    처리해서, 낮 시간대(예: 오전 10시, 미국장은 새벽 5시에 이미 마감해 몇 시간째
-    닫혀있는 상태)도 "막 개장한 순간"과 똑같이 0.01로 계산돼 거래량이 크게
-    부풀려짐. 장외(개장 전 포함)는 전부 1.0으로 통일."""
-    open_min, close_min = 22 * 60 + 30, 24 * 60 + 5 * 60
-    cur_min = now_kst.hour * 60 + now_kst.minute
-    if cur_min < 6 * 60:
-        cur_min += 24 * 60
-    if cur_min < open_min or cur_min >= close_min:
-        return 1.0
-    return max(0.01, (cur_min - open_min) / (close_min - open_min))
+    v2.15: KST 고정 오프셋(22:30~05:00)으로 계산하던 걸 ET로 실제 변환 후
+    판정하도록 재작성 — 서머타임이 자동 반영되고(예전엔 EST/EDT 전환기에
+    실제 개장 시각과 최대 1시간 어긋났을 것), 요일도 ET 기준으로 정확히
+    판단된다(KST로는 토요일이어도 ET로는 아직 금요일 오전~정오일 수 있어
+    실제로는 미장이 열려 있는 경우를 놓치지 않음 — 반대로 KST 요일만
+    봤다면 이런 경계 케이스에서 진짜 알림을 막았을 것)."""
+    if not _us_market_open(now_kst):
+        return None
+    now_et = now_kst.astimezone(ET)
+    open_min, close_min = 9 * 60 + 30, 16 * 60
+    cur_min = now_et.hour * 60 + now_et.minute
+    ratio = (cur_min - open_min) / (close_min - open_min)
+    return ratio if ratio >= MIN_SESSION_ELAPSED else None
 
 
 def volume_confirm(ticker, cur_volume, now_kst):
@@ -579,10 +631,19 @@ def volume_confirm(ticker, cur_volume, now_kst):
     (2) code = _kr_code(ticker)가 미국 티커에선 항상 None이라, 그 이후 로직이
         전부 한국 전용(코드 있어야 스캐너 조회, 한국장 시간으로 경과비율 계산)
         구조였음. 미국은 스캐너에 티커 그대로(.KQ/.KS 없이) 조회하고, 경과비율도
-        미국장 시간(22:30~05:00 KST) 기준으로 따로 계산하게 분기."""
+        미국장 시간 기준으로 따로 계산하게 분기.
+
+    v2.15: 장외/주말/개장 직후에는 avg를 조회하기 전에 먼저 걸러서 "판정
+    불가"를 바로 반환 — TWLO 사고(주말 KST 00:00에 "예상 1478%" 오발송)의
+    직접 원인이 여기(시간보정 분모가 잘못 계산됨)였음."""
     if not cur_volume:
         return None, False
     code = _kr_code(ticker)
+    is_kr = bool(code)
+    if is_kr and not _kr_market_open(now_kst):
+        return "⚪ 거래량 판정 불가 (국장 장외)", False
+    if not is_kr and not _us_market_open(now_kst):
+        return "⚪ 거래량 판정 불가 (미장 장외)", False
     try:
         if code:
             res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8)
@@ -598,27 +659,28 @@ def volume_confirm(ticker, cur_volume, now_kst):
         return None, False
     if not avg:
         return None, False
-    session_ratio = _session_elapsed_ratio(now_kst) if code else _session_elapsed_ratio_us(now_kst)
+    session_ratio = _session_elapsed_ratio(now_kst) if is_kr else _session_elapsed_ratio_us(now_kst)
+    if session_ratio is None:
+        return "⚪ 거래량 판정 불가 (장 시작 직후, 표본 부족)", False
     ratio = (cur_volume / session_ratio) / avg
     pct = int(ratio * 100)
-    early = session_ratio <= 0.05
     if ratio >= 1.5:
         tag = f"🟢 거래량 확증 (예상 {pct}%)"
     elif ratio >= 1.0:
         tag = f"🟡 거래량 애매 (예상 {pct}%)"
     else:
         tag = f"🔴 거래량 부족 (예상 {pct}%) — 가짜 돌파 의심"
-    if early:
-        tag += " ※장초반 추정 신뢰↓"
     return tag, True
 
 
 _pivot_near = set()      # 접근 예고 발송 기록
 _pos_fired = {}          # {포지션id: {'stop', '2R', '3R', ...}} 발송 기록 (재시작 시 초기화)
 _pos_last_price = {}     # {포지션id: 직전 폴링(2분 전) 가격} — 급락 감지용 (v2.12)
+_pos_last_price_time = {}  # {포지션id: 위 가격을 관측한 시각} — v2.15, 장외 갭 오탐 방지용
 _flash_fired = {}        # {포지션id: 마지막 급락 알림 시각} — 같은 하락에 반복 알림 방지 (재시작 시 초기화)
 FLASH_DROP_PCT = -5.0    # 진입 종목이 폴링 주기(2분) 사이 이 이상 빠지면 급락 알림
 FLASH_COOLDOWN_MIN = 10  # 종목당 재알림 쿨다운(분)
+FLASH_MAX_GAP_MIN = 5    # 직전 관측과 이 이상 벌어지면 "2분 폴링"이 아니라 장외 공백이므로 급락판정 skip
 
 
 def check_positions():
@@ -644,6 +706,13 @@ def check_positions():
         ticker = p.get("ticker")
         if not pid or not ticker or not entry or not stop or stop >= entry:
             continue
+        # v2.15: 장외면 스킵 — 급락 감지가 "직전 폴링 대비" 비교라 장외
+        # 고정가를 반복 비교하면 무의미하고, 폴링 재개 시점(개장 직후) 가격
+        # 변화를 "2분 새 급락"으로 오탐할 위험도 있음. R마일스톤/손절도 마찬가지로
+        # 실시간 가격 전제이므로 장중에만 평가.
+        _is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open() if _is_kr else _us_market_open()):
+            continue
         data = get_stock_data(ticker)
         if not data:
             continue
@@ -654,9 +723,16 @@ def check_positions():
         r_now = (price - entry) / (entry - stop)
 
         # 🔻 급락 감지 (v2.12): 직전 폴링(2분 전) 대비 -5% 이상 하락.
+        # v2.15: 직전 관측이 FLASH_MAX_GAP_MIN(5분)보다 오래됐으면(장 마감 공백,
+        # 봇 재시작 등) 비교 자체를 skip — 그 사이 정상적인 갭이 "2분 새 급락"으로
+        # 오탐되는 걸 방지. 가격/시각은 항상 최신으로 갱신해 다음 비교 기준을 만듦.
         prev_price = _pos_last_price.get(pid)
+        prev_time = _pos_last_price_time.get(pid)
+        now_dt0 = datetime.now(KST)
         _pos_last_price[pid] = price
-        if prev_price and prev_price > 0:
+        _pos_last_price_time[pid] = now_dt0
+        gap_ok = prev_time is not None and (now_dt0 - prev_time).total_seconds() <= FLASH_MAX_GAP_MIN * 60
+        if prev_price and prev_price > 0 and gap_ok:
             drop_pct = (price - prev_price) / prev_price * 100
             if drop_pct <= FLASH_DROP_PCT:
                 last_fire = _flash_fired.get(pid)
@@ -909,9 +985,16 @@ _dist_fired = {}         # {포지션id: 마지막 경고 날짜} — 하루 1�
 
 
 def check_distribution():
-    """보유 종목 분산(매도) 신호 감시 (v2.4) — 하루 2회(11:00, 15:00 KST).
-    진입 종목이 분산 danger면 ⚠️ 알림. 같은 종목 하루 1회만."""
+    """보유 종목 분산(매도) 신호 감시 (v2.4) — 매일 16:10 KST(종가 확정 후).
+    진입 종목이 분산 danger면 ⚠️ 알림. 같은 종목 하루 1회만.
+
+    v2.15: schedule.every().day는 주말도 그대로 실행돼서, 주말 16:10에
+    돌면 금요일 종가 그대로인 데이터를 "오늘자"로 다시 평가 → 이미
+    금요일에 알림 나간 종목이 (날짜 키가 바뀌었다는 이유만으로) 토/일
+    각각 또 알림 나가는 구조였음(피벗 돌파와 같은 계열 버그). 주말 스킵."""
     now = datetime.now(KST)
+    if now.weekday() >= 5:
+        return
     today = now.strftime("%Y-%m-%d")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
@@ -976,10 +1059,16 @@ def _get_ma(ticker):
 
 
 def check_ma_break():
-    """보유 종목 이평 이탈 감시 (v2.5) — 종가 기준, 장 마감 15:20 KST.
+    """보유 종목 이평 이탈 감시 (v2.5) — 매일 16:10 KST(종가 확정 후).
     진입 종목이 10/21(20)일선을 오늘 종가로 하향 이탈하면 트레일링 손절 알림.
-    +2R 이후 러너 관리용 — 종가 기준이라 장중 페이크에 안 속음."""
+    +2R 이후 러너 관리용 — 종가 기준이라 장중 페이크에 안 속음.
+
+    v2.15: check_distribution과 같은 이유로 주말 스킵 추가 — schedule
+    라이브러리가 주말도 그대로 실행해서, 금요일 종가로 이미 알림 나간
+    종목이 토/일에 날짜 키만 바뀌어 또 알림 나가는 구조였음."""
     now = datetime.now(KST)
+    if now.weekday() >= 5:
+        return
     today = now.strftime("%Y-%m-%d")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
@@ -1038,6 +1127,12 @@ def check_ma_near():
             continue
         if _ma_near_fired.get(ticker) == today:
             continue
+        # v2.15: 장외면 스킵 — 이평값 자체는 일봉 기준이라 장중에도 안 바뀌지만,
+        # 새벽/주말에 "지지 접근" 알림이 뜨는 건 타이밍상 무의미해서 실시간
+        # 알림류와 동일하게 장중에만 발송.
+        _is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open() if _is_kr else _us_market_open()):
+            continue
         ma = _get_ma(ticker)
         if not ma:
             continue
@@ -1080,7 +1175,10 @@ def check_ma_near():
 # 운영하면서 튜닝하기 쉽게 하려는 의도.
 _pullback_fired = {}      # {포지션id: 마지막 발송 날짜} — 같은 관찰종목 하루 1회
 PULLBACK_RS_MIN = 90
-PULLBACK_UD_MIN = 1.5
+# v2.15: PULLBACK_UD_MIN(예전 1.5) 게이트 제거 — ~/pullback 스캐너 쪽 측정
+# (2026-08 U/D Volume Ratio 조사, v5.57~v5.58)에서 U/D 비율의 방향이 성과와
+# 역상관/0비트로 나와 게이트로 쓸 근거가 없다고 결론남. 필터링엔 안 쓰고
+# 참고 수치로만 메시지에 남김(아래 "RS {rs} · U/D {ud}" 줄).
 PULLBACK_NEAR_PCT = 2.0       # 주봉10EMA ±2% 이내면 "근접"
 PULLBACK_BREAK_PCT = -3.0     # 10EMA 아래로 이만큼 넘게 이탈하면 붕괴로 보고 제외
 
@@ -1120,6 +1218,10 @@ def check_pullback_support():
         ticker = w.get("ticker")
         if not wid or not ticker or _pullback_fired.get(wid) == today:
             continue
+        # v2.15: 장외면 스킵 — check_ma_near과 동일한 이유(타이밍 무의미)
+        _is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open() if _is_kr else _us_market_open()):
+            continue
         sig = _get_pullback_signal(ticker)
         if not sig:
             continue
@@ -1128,8 +1230,6 @@ def check_pullback_support():
         ema10w = sig.get("weekly_ema10")
         dist = sig.get("weekly_ema10_dist_pct")
         if rs is None or rs < PULLBACK_RS_MIN:
-            continue
-        if ud is None or ud < PULLBACK_UD_MIN:
             continue
         if ema10w is None or dist is None or dist < PULLBACK_BREAK_PCT:
             continue     # 데이터 없음 또는 이미 붕괴(10EMA -3% 넘게 이탈)
@@ -1151,7 +1251,7 @@ def check_pullback_support():
             "",
             f"종목: <b>{name}</b> ({ticker})",
             f"현재가: <b>{format_price(close, cur)}</b> · 주봉10EMA {format_price(ema10w, cur)} ({dist:+.1f}%)",
-            f"RS {rs} · U/D {ud} (매집 우위)",
+            f"RS {rs}" + (f" · U/D {ud} (참고용, 게이트 아님)" if ud is not None else ""),
             f"손절 참고가: {format_price(stop, cur)} (지지선 -3%)",
         ]
         if risk_pct is not None:
@@ -1173,7 +1273,24 @@ def check_pullback_support():
 def check_pivot_breakout():
     """눌림목 스캐너의 대기(pending) 종목을 읽어, 피벗가 돌파 시 텔레그램 알림.
     스캐너 /api/watch/pending에서 {ticker, name, pivot, ...} 목록을 받아
-    각 현재가가 피벗 이상이면 '돌파' 알림. 한 종목당 1회만(중복 방지)."""
+    각 현재가가 피벗 이상이면 '돌파' 알림. 진짜 재돌파(피벗 아래로 내려갔다
+    다시 올라옴)만 재알림 — 날짜와 무관.
+
+    v2.15 버그수정: 2026-08-09 00:00 KST에 CXW/RCUS/TWLO/340570 4종목이
+    동시에 "돌파" 알림 — 미장 19시간 전, 국장 32시간 전에 이미 마감된
+    상태였음. 원인 두 가지 결합:
+    (1) 이 함수 자체에 요일/장시간 가드가 없어서 스케줄러(매 1분)가 주말
+        새벽에도 계속 돌아 스캐너의 (전 거래일 종가 그대로인) 가격으로
+        피벗 비교를 반복함.
+    (2) 옛 `_pivot_fired`가 {종목id: "YYYY-MM-DD"} 날짜 키였음 — 자정
+        (KST 00:00)에 날짜 문자열이 바뀌면, 그 전날 이미 피벗 위였던
+        종목 전부가 "아직 오늘자 기록 없음"으로 보여 다음 폴링에 한꺼번에
+        재알림됨. "재돌파"가 아니라 그냥 자정이 지났을 뿐인데도.
+    두 개를 각각 고침 — 종목별 시장 개장 여부로 걸러서 장외엔 아예 안
+    돌게(1), `_pivot_fired`를 `_pivot_above`(마지막 관측이 피벗 위였는지)
+    상태전환 방식으로 교체해 "아래→위 전이"만 알림으로 인정(2, 날짜 무관).
+    부수 효과: 봇 재시작 직후에도 이미 피벗 위인 종목 전체가 "신규 돌파"로
+    오인되던 문제가 같이 해결됨(처음 관측한 종목은 알림 없이 상태만 기록)."""
     now = datetime.now(KST).strftime("%H:%M:%S")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
@@ -1195,6 +1312,10 @@ def check_pivot_breakout():
             continue
         _tk = st.get("ticker")
         if not _tk:
+            continue
+        # v2.15: 장외면 스킵 — 리테스트도 실시간 가격이어야 의미 있음
+        _is_kr_tk = bool(_kr_code(_tk))
+        if not (_kr_market_open() if _is_kr_tk else _us_market_open()):
             continue
         try:
             _p = float(st["pivot"])
@@ -1237,9 +1358,11 @@ def check_pivot_breakout():
         if not ticker or not pivot:
             continue
 
-        # v2.8: 날짜 기반 중복 방지 — 같은 날 1회. 다음날 재돌파면 다시 알림.
-        # (기존 영구 set은 한번 알림 후 재돌파를 봇 재시작 전까지 영원히 무시)
-        if _pivot_fired.get(wid) == _today:
+        # v2.15: 장외면 스킵 — 목표가/피벗접근/피벗돌파 전부 실시간 가격이
+        # 전제라, 장 마감 후(스캐너가 전일 종가를 그대로 돌려주는 상태)엔
+        # 판정 자체가 무의미. 종목마다 자기 시장(KR/US) 기준으로 판정.
+        _is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open() if _is_kr else _us_market_open()):
             continue
         data = get_stock_data(ticker)
         if not data:
@@ -1297,8 +1420,18 @@ def check_pivot_breakout():
                 _lines = [_gl, ""] + _lines
             send_telegram("\n".join(_lines))
             print(f"  ⚡ {name} 피벗 접근 {price} → {pivot}")
-        if price >= pivot:                     # 피벗 돌파!
-            _pivot_fired[wid] = _today
+        # v2.15: 날짜 무관 상태전환 — 아래→위로 "다시" 올라올 때만 돌파 알림.
+        # (자정에 날짜가 바뀌어도 이미 피벗 위였던 종목은 재알림되지 않음 —
+        # 옛 _pivot_fired의 날짜 키 리셋 버그가 여기서 원천적으로 사라짐)
+        _now_above = price >= pivot
+        _was_above = _pivot_above.get(wid)
+        _pivot_above[wid] = _now_above
+        if _was_above is None:
+            # 처음 관측(감시 등록 직후 or 봇 재시작 직후) — 상태만 기록하고
+            # 알림은 안 보냄. 재시작 직후 이미 피벗 위인 종목 전체가
+            # "신규 돌파"로 오인되는 걸 방지.
+            continue
+        if _now_above and not _was_above:      # 진짜 돌파(아래→위 전이)!
             # v2.8: 리테스트 감시 시작 (같은 날은 리테스트 판정 안 함)
             _pivot_state[wid] = {"pivot": float(pivot), "fired": _today, "retest_fired": False,
                                  "ticker": ticker, "name": w.get("name") or ticker,
@@ -1334,7 +1467,7 @@ def check_pivot_breakout():
             else:
                 lines.append("⚠️ 거래량은 HTS에서 직접 확인 (전일 동시간 대비)")
             lines.append("피벗 +2% 추격 금지")
-            lines.append(f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
+            lines.append(f"시각: {_fmt_time_dual(with_date=True)}")
             _gl = _gate_line(ticker)          # v2.7: 게이트를 알림 안에 (헤더)
             if _gl:
                 lines = [_gl, ""] + lines
@@ -1362,7 +1495,7 @@ def check_alerts():
                    f"종목: <b>{a['ticker']}</b>\n"
                    f"현재가: <b>{format_price(price, data['currency'])}</b>\n"
                    f"목표가 {format_price(a['target'], data['currency'])} {direction}\n"
-                   f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}")
+                   f"시각: {_fmt_time_dual(with_date=True)}")
             send_telegram(msg)
 
 _opening_surge_fired_date = None   # 오늘 이미 발송했는지 (같은 날 중복 방지)
@@ -1406,7 +1539,7 @@ def check_opening_surge():
     lines += [
         "",
         "※ 진입 신호 아님 — 왜 돈이 몰렸는지(뉴스/공시) 확인 후 판단하세요.",
-        f"시각: {now.strftime('%H:%M')}",
+        f"시각: {_fmt_time_dual(now)}",
     ]
     send_telegram("\n".join(lines))
     print(f"  💸 장초반 급증 {len(hits)}종목 발송")
@@ -1420,6 +1553,11 @@ def check_surge():
     tickers = list(set(tickers))
 
     for ticker in tickers:
+        # v2.15: 장외면 스킵 — 장 마감 후 change_pct는 전일 종가 대비 고정값이라
+        # 매번 재조회해도 값이 안 바뀜. 게이트 없으면 폴링마다 API만 낭비.
+        _is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open() if _is_kr else _us_market_open()):
+            continue
         data = get_stock_data(ticker)
         if not data:
             continue
@@ -1434,7 +1572,7 @@ def check_surge():
                     f"{emoji} <b>{ticker} 급{'등' if pct > 0 else '락'} 알림!</b>\n\n"
                     f"현재가: {format_price(data['price'], data['currency'])}\n"
                     f"등락률: {pct:+.2f}%\n"
-                    f"시각: {datetime.now(KST).strftime('%H:%M:%S')}"
+                    f"시각: {_fmt_time_dual(with_seconds=True)}"
                 )
         else:
             # ✅ 급등락 구간 벗어나면 초기화 (재진입 감지용)
