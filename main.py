@@ -70,27 +70,53 @@ _pivot_state = {}      # v2.8: {종목id: {"pivot": float, "fired": "date", "ret
                        # ⚠️ 메모리 저장 — 봇 재배포 시 리셋됨 (봇에 영구볼륨 없음, 선언된 한계)
 _target_fired = set()  # 하향 목표가 도달 알림 보낸 종목 id (v2.6)
 
+# v2.16: 예전엔 파싱 실패한 줄을 조용히 건너뛰어서(파트 부족/숫자 변환
+# 실패) 오타 하나로 알림이 사라져도 알 방법이 없었고, condition 오타는
+# 검증 자체가 없어 파싱은 통과하지만 above/below 어느 쪽에도 안 걸려
+# 영원히 발동 안 하는 식으로 조용히 죽어 있었음. 무시/무효 처리된 항목을
+# 전부 problems로 모아서 반환 — 발동 로직(check_alerts의 above/below
+# 비교)은 그대로, 파싱 단계 검증과 시작 시 경고만 추가.
+KR_TICKER_NO_SUFFIX_RE = re.compile(r"^\d{6}$")
+
+
 def parse_alerts():
+    """ALERTS 환경변수(세미콜론 구분)를 파싱. 반환: (alerts, problems).
+    problems 항목: {"index": ALERTS_RAW 내 세미콜론 기준 순번(1부터),
+    "raw": 원문, "reason": 사유}. 접미사 누락(KR_TICKER_NO_SUFFIX_RE)은
+    파싱 자체는 통과시켜 alerts에 그대로 넣는다(형식상 유효 — 발동 로직
+    변경 없음) — 다만 problems에도 같이 실어서 경고에 포함."""
     alerts = []
-    for item in ALERTS_RAW.split(";"):
-        item = item.strip()
-        if not item:
+    problems = []
+    for idx, item in enumerate(ALERTS_RAW.split(";"), start=1):
+        raw = item.strip()
+        if not raw:
             continue
-        parts = item.split(",")
+        parts = raw.split(",")
         if len(parts) != 3:
+            problems.append({"index": idx, "raw": raw, "reason": "파트 부족 또는 형식 오류"})
             continue
         ticker = parts[0].strip().upper()
         condition = parts[1].strip().lower()
-        target = parts[2].strip()
+        target_raw = parts[2].strip()
+        if condition not in ("above", "below"):
+            problems.append({"index": idx, "raw": raw, "reason": "조건 오류"})
+            continue
         try:
-            alerts.append({"ticker": ticker, "condition": condition, "target": float(target), "triggered": False})
+            target = float(target_raw)
         except ValueError:
-            pass
-    return alerts
+            problems.append({"index": idx, "raw": raw, "reason": "목표가 숫자 변환 실패"})
+            continue
+        if KR_TICKER_NO_SUFFIX_RE.match(ticker):
+            problems.append({"index": idx, "raw": raw, "reason": "접미사 누락 — .KS 또는 .KQ 필요"})
+        alerts.append({"ticker": ticker, "condition": condition, "target": target, "triggered": False})
+    return alerts, problems
 
-alerts = parse_alerts()
+
+alerts, _alert_problems = parse_alerts()
 prev_prices = {}
 print(f"[시작] 총 {len(alerts)}개 알림 설정됨")
+if _alert_problems:
+    print(f"[시작 경고] ALERTS 무시/의심 항목 {len(_alert_problems)}개 — 텔레그램으로 별도 발송 예정")
 
 import time as _time
 
@@ -466,6 +492,29 @@ def send_telegram(message, chat_id=None):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[텔레그램 오류] {e}")
+
+
+def format_alert_problems_message(problems):
+    """v2.16 — parse_alerts()가 모은 무시/의심 항목을 텔레그램 메시지로.
+    테스트에서 문자열만 검증할 수 있게 send_telegram 호출과 분리."""
+    lines = [f"⚠️ ALERTS 무시된 항목 {len(problems)}개:"]
+    for p in problems:
+        lines.append(f"{p['index']}번: {p['raw']} ({p['reason']})")
+    return "\n".join(lines)
+
+
+def notify_alert_parse_problems(problems):
+    """v2.16 — 봇 시작 시 parse_alerts()의 problems가 1개 이상이면 텔레그램
+    경고. send_telegram이 이 시점에야 정의돼서(모듈 상단의 parse_alerts()
+    호출 시점엔 아직 없음) 여기서 호출 — 무시된 항목이 없으면 조용히
+    아무것도 안 보냄(기존 [시작] print만 남는 정상 케이스)."""
+    if not problems:
+        return
+    send_telegram(format_alert_problems_message(problems))
+
+
+notify_alert_parse_problems(_alert_problems)
+
 
 def get_updates(offset=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?timeout=1"
