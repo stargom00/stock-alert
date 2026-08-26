@@ -1594,6 +1594,50 @@ def check_opening_surge():
     print(f"  💸 장초반 급증 {len(hits)}종목 발송")
 
 
+_moneyflow_sent = {}  # v2.17: {market: 마지막으로 발송한 daykey} — 재발송 방지.
+                      # in-memory라 재배포 시 리셋됨(다른 _*_fired 상태와 동일한 한계).
+
+
+def check_money_flow():
+    """💰 돈의 흐름 데일리 리포트 알림 (v2.17, 사용자 지시). pullback 앱이
+    장마감 후 생성해 저장하는 GET /api/moneyflow/{market}/summary를
+    폴링해서, 아직 안 보낸 날짜의 리포트가 있으면 텔레그램으로 요약 발송.
+    1단계 계산만 있거나 AI 요약 JSON 파싱 실패(error 필드 있음) 시엔
+    조용히 스킵하고 다음 폴링에서 재시도 — 완성될 때까지 기다리는 게
+    목적이라 실패를 알림으로 띄우지 않는다."""
+    for market, label in (("kr", "KR"), ("us", "US")):
+        try:
+            res = requests.get(f"{SCANNER_URL}/api/moneyflow/{market}/summary", timeout=15)
+            j = res.json()
+        except Exception as e:
+            print(f"[돈의흐름] {market} 조회 실패: {e}")
+            continue
+        date = j.get("date")
+        if j.get("error") or not date:
+            continue
+        if _moneyflow_sent.get(market) == date:
+            continue
+        try:
+            date_disp = datetime.strptime(date, "%Y-%m-%d").strftime("%-m/%-d")
+        except ValueError:
+            date_disp = date
+        strong = j.get("strong_themes") or []
+        weak = j.get("weak_themes") or []
+        lines = [
+            f"💰 <b>돈의 흐름 — {label} {date_disp}</b>",
+            "",
+            "강세: " + (" / ".join(strong) if strong else "(없음)"),
+            "약세: " + (" / ".join(weak) if weak else "(없음)"),
+        ]
+        final = j.get("final_sentence")
+        if final:
+            lines += ["", f"📝 오늘 한 문장: {final}"]
+        lines += ["", f"전문: {j.get('url') or SCANNER_URL + '/moneyflow'}"]
+        send_telegram("\n".join(lines))
+        _moneyflow_sent[market] = date
+        print(f"[돈의흐름] {market} {date} 발송 완료")
+
+
 def check_surge():
     """급등락 감지"""
     tickers = [a["ticker"] for a in alerts]
@@ -1771,6 +1815,7 @@ schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
 schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아침 관찰 다이제스트
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
+schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리 리포트 발송 감시
 
 check_alerts()
 
