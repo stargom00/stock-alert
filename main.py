@@ -1638,6 +1638,52 @@ def check_money_flow():
         print(f"[돈의흐름] {market} {date} 발송 완료")
 
 
+_jongga_sent = {}  # v2.18: {'date': 마지막으로 발송한 날짜} — 재발송 방지.
+                   # in-memory라 재배포 시 리셋됨(다른 _*_fired 상태와 동일한 한계).
+
+
+def check_jongga():
+    """🇰🇷 종가베팅 후보 알림 (v2.18, 사용자 지시). pullback 앱의
+    GET /api/jongga/candidates(v5.97)를 평일 14:48경 1회 폴링해서, 오늘
+    후보가 있으면 텔레그램으로 발송. check_money_flow(v2.17)와 같은
+    구조(API 폴링 → 포맷 → 날짜 키로 재발송 방지 → 발송) — 다만 저건
+    10분 간격 지속 폴링(리포트 완성 시점을 못 예측해서)이고, 이건
+    pullback 쪽 스냅샷이 14:40~15:00 사이 1회 확정되는 걸 알고 있어
+    check_distribution/check_ma_break(v2.4/2.5, 매일 16:10 KST)처럼
+    schedule.every().day.at()로 고정 시각 1회만 건다.
+    후보 0개 또는 API 에러/스냅샷 없음(ok=False)은 조용히 스킵 — 침묵
+    자체는 실패가 아니라 정상 동작(사용자 지시 2·3번)."""
+    now = datetime.now(KST)
+    if now.weekday() >= 5:
+        return
+    today = now.strftime("%Y-%m-%d")
+    if _jongga_sent.get("date") == today:
+        return
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/jongga/candidates", timeout=15)
+        j = res.json()
+    except Exception as e:
+        print(f"[종가베팅] 조회 실패: {e}")
+        return
+    if not j.get("ok"):
+        return
+    candidates = j.get("candidates") or []
+    if not candidates:
+        return
+    lines = [f"🌆 <b>오늘의 종가베팅 후보 {len(candidates)}개</b>", ""]
+    for c in candidates:
+        name = c.get("name") or c.get("ticker") or "?"
+        chg = c.get("change_pct")
+        rank = c.get("turnover_rank")
+        chg_str = f"+{chg}%" if chg is not None else "?"
+        rank_str = f"{rank}위" if rank is not None else "?"
+        lines.append(f"{name} ({chg_str}, 거래대금 {rank_str})")
+    lines += ["", "⏰ 15:20 동시호가 전 진입 · 익일 시초~9:05 전량 매도"]
+    send_telegram("\n".join(lines))
+    _jongga_sent["date"] = today
+    print(f"[종가베팅] {today} {len(candidates)}건 발송 완료")
+
+
 def check_surge():
     """급등락 감지"""
     tickers = [a["ticker"] for a in alerts]
@@ -1816,6 +1862,7 @@ schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아�
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
 schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리 리포트 발송 감시
+schedule.every().day.at("14:48", "Asia/Seoul").do(check_jongga)  # v2.18 종가베팅 후보 발송
 
 check_alerts()
 
