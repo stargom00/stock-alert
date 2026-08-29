@@ -22,6 +22,13 @@ MORNING_TICKERS = os.environ.get("MORNING_TICKERS", "")  # 아침 요약 종목 
 SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기준 % (기본 5%)
 # 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
 SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
+# v2.21: pullback이 APP_PASSWORD로 비공개 전환되면(v5.105) 이 봇이 폴링하는
+# 읽기 전용 API들은 세션 쿠키 대신 이 헤더로 통과한다(pullback의
+# _is_bot_read_path 허용목록과 정확히 일치해야 함). pullback이 아직 공개
+# 상태(APP_PASSWORD 미설정)면 이 토큰도 안 넣어도 되지만, 넣어놔도 무해
+# (그 앱은 토큰 검사 자체를 안 함) — 그래서 미설정(빈 값)도 그냥 허용.
+API_READ_TOKEN = os.environ.get("API_READ_TOKEN", "")
+_SCANNER_HEADERS = {"X-Api-Read-Token": API_READ_TOKEN} if API_READ_TOKEN else {}
 
 
 def _kr_market_open(now_kst=None):
@@ -696,13 +703,13 @@ def volume_confirm(ticker, cur_volume, now_kst):
         return "⚪ 거래량 판정 불가 (미장 장외)", False
     try:
         if code:
-            res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8)
+            res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KQ", timeout=8, headers=_SCANNER_HEADERS)
             j = res.json()
             if not j.get("ok"):
-                res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KS", timeout=8)
+                res = requests.get(f"{SCANNER_URL}/api/vol/{code}.KS", timeout=8, headers=_SCANNER_HEADERS)
                 j = res.json()
         else:
-            res = requests.get(f"{SCANNER_URL}/api/vol/{ticker.upper()}", timeout=8)
+            res = requests.get(f"{SCANNER_URL}/api/vol/{ticker.upper()}", timeout=8, headers=_SCANNER_HEADERS)
             j = res.json()
         avg = j.get("avg_volume_50") or 0
     except Exception:
@@ -742,7 +749,7 @@ def check_positions():
     직전 폴링 가격(_pos_last_price)과만 비교한다 — entry/stop 대비가 아님."""
     now = datetime.now(KST).strftime("%H:%M:%S")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10, headers=_SCANNER_HEADERS)
         positions = res.json().get("positions", [])
     except Exception as e:
         print(f"[{now}] 포지션 조회 실패: {e}")
@@ -867,7 +874,7 @@ def get_gate(force=False):
     if not force and _gate_cache["data"] and now - _gate_cache["ts"] < _GATE_CACHE_TTL:
         return _gate_cache["data"]
     try:
-        res = requests.get(f"{SCANNER_URL}/api/market/gate", timeout=15)
+        res = requests.get(f"{SCANNER_URL}/api/market/gate", timeout=15, headers=_SCANNER_HEADERS)
         j = res.json()
         if not j.get("ok"):
             return _gate_cache["data"]
@@ -980,7 +987,7 @@ def weekly_report():
     """주간 리포트 (v2.2) — 일요일 09:00 KST.
     주말 루틴의 자동화: 주간 R·승패·충동 카운트·진입중 포지션."""
     try:
-        res = requests.get(f"{SCANNER_URL}/api/journal", timeout=30)
+        res = requests.get(f"{SCANNER_URL}/api/journal", timeout=30, headers=_SCANNER_HEADERS)
         rows = res.json()
         if isinstance(rows, dict):
             rows = rows.get("journal", rows.get("rows", []))
@@ -1047,7 +1054,7 @@ def check_distribution():
         return
     today = now.strftime("%Y-%m-%d")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10, headers=_SCANNER_HEADERS)
         positions = res.json().get("positions", [])
     except Exception as e:
         print(f"[분산] 포지션 조회 실패: {e}")
@@ -1062,10 +1069,10 @@ def check_distribution():
         code = _kr_code(ticker)
         q = f"{code}.KQ" if code else ticker
         try:
-            res = requests.get(f"{SCANNER_URL}/api/dist/{q}", timeout=10)
+            res = requests.get(f"{SCANNER_URL}/api/dist/{q}", timeout=10, headers=_SCANNER_HEADERS)
             j = res.json()
             if not j.get("ok") and code:
-                res = requests.get(f"{SCANNER_URL}/api/dist/{code}.KS", timeout=10)
+                res = requests.get(f"{SCANNER_URL}/api/dist/{code}.KS", timeout=10, headers=_SCANNER_HEADERS)
                 j = res.json()
         except Exception:
             continue
@@ -1099,7 +1106,7 @@ def _get_ma(ticker):
     code = _kr_code(ticker)
     for q in ([f"{code}.KQ", f"{code}.KS"] if code else [ticker]):
         try:
-            res = requests.get(f"{SCANNER_URL}/api/ma/{q}", timeout=8)
+            res = requests.get(f"{SCANNER_URL}/api/ma/{q}", timeout=8, headers=_SCANNER_HEADERS)
             j = res.json()
             if j.get("ok"):
                 return j
@@ -1121,7 +1128,7 @@ def check_ma_break():
         return
     today = now.strftime("%Y-%m-%d")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10, headers=_SCANNER_HEADERS)
         positions = res.json().get("positions", [])
     except Exception as e:
         print(f"[이평이탈] 조회 실패: {e}")
@@ -1166,7 +1173,7 @@ def check_ma_near():
     now = datetime.now(KST)
     today = now.strftime("%Y-%m-%d")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
         pending = res.json().get("pending", [])
     except Exception:
         return
@@ -1239,7 +1246,7 @@ def _get_pullback_signal(ticker):
     code = _kr_code(ticker)
     for q in ([f"{code}.KQ", f"{code}.KS"] if code else [ticker]):
         try:
-            res = requests.get(f"{SCANNER_URL}/api/pullback-signal/{q}", timeout=8)
+            res = requests.get(f"{SCANNER_URL}/api/pullback-signal/{q}", timeout=8, headers=_SCANNER_HEADERS)
             j = res.json()
             if j.get("ok"):
                 return j
@@ -1256,7 +1263,7 @@ def check_pullback_support():
     now = datetime.now(KST)
     today = now.strftime("%Y-%m-%d")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
         pending = res.json().get("pending", [])
     except Exception as e:
         print(f"[눌림지지] 조회 실패: {e}")
@@ -1343,7 +1350,7 @@ def check_pivot_breakout():
     오인되던 문제가 같이 해결됨(처음 관측한 종목은 알림 없이 상태만 기록)."""
     now = datetime.now(KST).strftime("%H:%M:%S")
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
         pending = res.json().get("pending", [])
     except Exception as e:
         print(f"[{now}] 대기종목 조회 실패: {e}")
@@ -1565,7 +1572,7 @@ def check_opening_surge():
     if _opening_surge_fired_date == today:
         return
     try:
-        res = requests.get(f"{SCANNER_URL}/api/opening-surge", timeout=60)
+        res = requests.get(f"{SCANNER_URL}/api/opening-surge", timeout=60, headers=_SCANNER_HEADERS)
         j = res.json()
         hits = j.get("hits", [])
     except Exception as e:
@@ -1656,7 +1663,7 @@ def check_money_flow():
     같은 이유로 스킵 — 필드 없으면(구 배포) fail-open으로 기존 동작."""
     for market, label in (("kr", "KR"), ("us", "US")):
         try:
-            res = requests.get(f"{SCANNER_URL}/api/moneyflow/{market}/summary", timeout=15)
+            res = requests.get(f"{SCANNER_URL}/api/moneyflow/{market}/summary", timeout=15, headers=_SCANNER_HEADERS)
             j = res.json()
         except Exception as e:
             print(f"[돈의흐름] {market} 조회 실패: {e}")
@@ -1725,7 +1732,7 @@ def check_jongga():
     if _jongga_sent.get("date") == today:
         return
     try:
-        res = requests.get(f"{SCANNER_URL}/api/jongga/candidates", timeout=15)
+        res = requests.get(f"{SCANNER_URL}/api/jongga/candidates", timeout=15, headers=_SCANNER_HEADERS)
         j = res.json()
     except Exception as e:
         print(f"[종가베팅] 조회 실패: {e}")
@@ -1769,7 +1776,7 @@ def check_toss_sync():
     _jongga_sent와 동일한 날짜키 dedup 패턴 재사용) — 09:30/21:30
     스케줄 중 하나가 이미 오늘 이 IP로 보냈으면 다음 폴링은 스킵."""
     try:
-        res = requests.get(f"{SCANNER_URL}/api/positions", timeout=15)
+        res = requests.get(f"{SCANNER_URL}/api/positions", timeout=15, headers=_SCANNER_HEADERS)
         j = res.json()
     except Exception as e:
         print(f"[토스동기화] 조회 실패: {e}")
@@ -1844,7 +1851,7 @@ def watch_digest():
     if now.weekday() >= 5:      # 주말 스킵
         return
     try:
-        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=15)
+        res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=15, headers=_SCANNER_HEADERS)
         pending = res.json().get("pending", [])
     except Exception as e:
         print(f"[다이제스트] 조회 실패: {e}")
@@ -1939,7 +1946,7 @@ def morning_summary():
 # 대기종목(피벗 감시) 개수 조회 (실패해도 무시)
 _pending_cnt = 0
 try:
-    _r = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10)
+    _r = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
     _pending_cnt = _r.json().get("count", 0)
 except Exception:
     pass
