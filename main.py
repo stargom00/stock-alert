@@ -1630,7 +1630,8 @@ def _save_sent_log():
     try:
         tmp = _SENT_LOG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent}, f, ensure_ascii=False)
+            json.dump({"moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent,
+                    "toss_sync_sent": _toss_sync_sent}, f, ensure_ascii=False)
         os.replace(tmp, _SENT_LOG_PATH)
     except OSError as e:
         print(f"[발송기록] 저장 실패: {e}")
@@ -1749,6 +1750,51 @@ def check_jongga():
     _jongga_sent["date"] = today
     _save_sent_log()   # v2.19
     print(f"[종가베팅] {today} {len(candidates)}건 발송 완료")
+
+
+_toss_sync_sent = {}   # v2.20: {ip: 마지막으로 발송한 날짜(YYYY-MM-DD)} — 같은 IP 하루 1회만.
+_toss_sync_sent.update(_sent_log_loaded.get("toss_sync_sent") or {})   # v2.20: 재시작 후 복원
+
+
+def check_toss_sync():
+    """💼 토스 포지션 동기화 실패(IP 미허용) 알림 (v2.20, 사용자 지시).
+    pullback의 GET /api/positions(v5.104)가 sync_error 필드를 준다 — 토스
+    Open API가 맥 로컬의 현재 공인 IP를 허용 목록에서 거부(403)하면 채워지고,
+    다음 성공적인 동기화 때 서버가 자동으로 지운다. 발송 로직은 이 필드의
+    존재 여부만 본다 — "언제부터"(since) 계산이나 정상 여부 판정은 전부
+    pullback 쪽 책임, 여기선 그대로 반영만 한다.
+    sync_error 없으면 조용히 스킵(정상 상태에서 매번 조회만 하고 끝) —
+    check_jongga/check_money_flow와 같은 "침묵이 곧 정상" 패턴.
+    같은 ip로는 하루 1회만 발송(_toss_sync_sent, check_jongga의
+    _jongga_sent와 동일한 날짜키 dedup 패턴 재사용) — 09:30/21:30
+    스케줄 중 하나가 이미 오늘 이 IP로 보냈으면 다음 폴링은 스킵."""
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/positions", timeout=15)
+        j = res.json()
+    except Exception as e:
+        print(f"[토스동기화] 조회 실패: {e}")
+        return
+    err = j.get("sync_error")
+    if not err:
+        return
+    ip = err.get("ip") or "확인불가"
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    if _toss_sync_sent.get(ip) == today:
+        return
+    since_raw = err.get("since")
+    since_disp = since_raw or "?"
+    if since_raw:
+        try:
+            since_disp = datetime.fromisoformat(since_raw).astimezone(KST).strftime("%m/%d %H:%M")
+        except ValueError:
+            pass
+    send_telegram(
+        f"⚠️ 토스 포지션 동기화 실패 중 — IP 미허용: {ip}\n"
+        f"토스증권 → Open API → 허용 IP에 등록 필요 (since {since_disp})"
+    )
+    _toss_sync_sent[ip] = today
+    _save_sent_log()   # v2.20
+    print(f"[토스동기화] IP 미허용 알림 발송 (ip={ip})")
 
 
 def check_surge():
@@ -1930,6 +1976,8 @@ schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report
 schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
 schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리 리포트 발송 감시
 schedule.every().day.at("14:48", "Asia/Seoul").do(check_jongga)  # v2.18 종가베팅 후보 발송
+schedule.every().day.at("09:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 토스 동기화 IP 실패 감시
+schedule.every().day.at("21:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 (하루 2회)
 
 check_alerts()
 
