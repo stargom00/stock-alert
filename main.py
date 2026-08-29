@@ -2,6 +2,7 @@ import os
 from names import resolve_ticker
 import time
 import re
+import json
 import requests
 import schedule
 import pytz
@@ -1594,8 +1595,49 @@ def check_opening_surge():
     print(f"  💸 장초반 급증 {len(hits)}종목 발송")
 
 
+# ── 발송 기록 파일 저장 (v2.19, 사용자 지시) ──────────────────────────
+# _moneyflow_sent/_jongga_sent만 파일로 옮긴다(다른 _*_fired류는 그대로
+# in-memory — 요청 범위가 이 둘로 한정됨, 포지션/피벗류는 재시작하면
+# 어차피 포지션 자체를 다시 불러오면서 자연 복구되는 구조라 지금은
+# 손 안 댐). Railway 볼륨(DATA_DIR 환경변수, 웹서비스처럼 볼륨 마운트가
+# 있으면) 우선, 없으면 /tmp — worker dyno라 재배포 시 컨테이너가
+# 새로 뜨는 건 pullback과 동일하지만, 최소한 "같은 배포 안에서 재시작"
+# (크래시 후 자동 재기동 등)에는 살아남아 그 사이의 중복 발송을 막는다.
+def _sent_log_path():
+    d = os.environ.get("DATA_DIR", "/tmp")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        d = "/tmp"
+    return os.path.join(d, "sent_log.json")
+
+
+_SENT_LOG_PATH = _sent_log_path()
+
+
+def _load_sent_log():
+    if os.path.exists(_SENT_LOG_PATH):
+        try:
+            with open(_SENT_LOG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except (ValueError, OSError):
+            return {}
+    return {}
+
+
+def _save_sent_log():
+    try:
+        tmp = _SENT_LOG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent}, f, ensure_ascii=False)
+        os.replace(tmp, _SENT_LOG_PATH)
+    except OSError as e:
+        print(f"[발송기록] 저장 실패: {e}")
+
+
 _moneyflow_sent = {}  # v2.17: {market: 마지막으로 발송한 daykey} — 재발송 방지.
-                      # in-memory라 재배포 시 리셋됨(다른 _*_fired 상태와 동일한 한계).
+                      # v2.19: 파일로도 저장(_save_sent_log) — 재시작 후에도 유지.
 
 
 def check_money_flow():
@@ -1604,7 +1646,13 @@ def check_money_flow():
     폴링해서, 아직 안 보낸 날짜의 리포트가 있으면 텔레그램으로 요약 발송.
     1단계 계산만 있거나 AI 요약 JSON 파싱 실패(error 필드 있음) 시엔
     조용히 스킵하고 다음 폴링에서 재시도 — 완성될 때까지 기다리는 게
-    목적이라 실패를 알림으로 띄우지 않는다."""
+    목적이라 실패를 알림으로 띄우지 않는다.
+
+    v2.19(사용자 지시): pullback API의 trading_day 필드(v5.99 — 주말+
+    공휴일 정적 목록 기준)로 비개장일 리포트는 스킵. 이 함수는 원래
+    자체 요일 가드가 없었는데(10분 지속폴링이라 "완성될 때까지 기다림"
+    설계) trading_day가 False면 애초에 완성될 정상 리포트가 아니므로
+    같은 이유로 스킵 — 필드 없으면(구 배포) fail-open으로 기존 동작."""
     for market, label in (("kr", "KR"), ("us", "US")):
         try:
             res = requests.get(f"{SCANNER_URL}/api/moneyflow/{market}/summary", timeout=15)
@@ -1614,6 +1662,8 @@ def check_money_flow():
             continue
         date = j.get("date")
         if j.get("error") or not date:
+            continue
+        if j.get("trading_day") is False:   # v2.19
             continue
         if _moneyflow_sent.get(market) == date:
             continue
@@ -1635,11 +1685,20 @@ def check_money_flow():
         lines += ["", f"전문: {j.get('url') or SCANNER_URL + '/moneyflow'}"]
         send_telegram("\n".join(lines))
         _moneyflow_sent[market] = date
+        _save_sent_log()   # v2.19
         print(f"[돈의흐름] {market} {date} 발송 완료")
 
 
 _jongga_sent = {}  # v2.18: {'date': 마지막으로 발송한 날짜} — 재발송 방지.
-                   # in-memory라 재배포 시 리셋됨(다른 _*_fired 상태와 동일한 한계).
+                   # v2.19: 파일로도 저장(_save_sent_log) — 재시작 후에도 유지.
+
+# v2.19: 시작 시 파일에서 발송 기록 복원 — 둘 다 선언된 뒤에 로드해야
+# _load_sent_log()가 채워준 값을 정확히 반영(선언 순서 그대로 덮어쓰기 방지).
+_sent_log_loaded = _load_sent_log()
+_moneyflow_sent.update(_sent_log_loaded.get("moneyflow_sent") or {})
+_jongga_sent.update(_sent_log_loaded.get("jongga_sent") or {})
+if _sent_log_loaded:
+    print(f"[발송기록] 복원: moneyflow={_moneyflow_sent} jongga={_jongga_sent}")
 
 
 def check_jongga():
@@ -1652,7 +1711,12 @@ def check_jongga():
     check_distribution/check_ma_break(v2.4/2.5, 매일 16:10 KST)처럼
     schedule.every().day.at()로 고정 시각 1회만 건다.
     후보 0개 또는 API 에러/스냅샷 없음(ok=False)은 조용히 스킵 — 침묵
-    자체는 실패가 아니라 정상 동작(사용자 지시 2·3번)."""
+    자체는 실패가 아니라 정상 동작(사용자 지시 2·3번).
+
+    v2.19(사용자 지시): 자체 주말 가드(weekday>=5)는 그대로 유지하고,
+    pullback API의 trading_day 필드(v5.99 — 주말+공휴일 정적 목록 기준)로
+    공휴일까지 추가로 걸러 이중 확인. trading_day 필드가 아직 없는(구
+    배포) 응답이면 None이라 걸러지지 않고 기존처럼 동작(fail-open)."""
     now = datetime.now(KST)
     if now.weekday() >= 5:
         return
@@ -1666,6 +1730,8 @@ def check_jongga():
         print(f"[종가베팅] 조회 실패: {e}")
         return
     if not j.get("ok"):
+        return
+    if j.get("trading_day") is False:   # v2.19: pullback이 공휴일이라고 확인해주면 스킵
         return
     candidates = j.get("candidates") or []
     if not candidates:
@@ -1681,6 +1747,7 @@ def check_jongga():
     lines += ["", "⏰ 15:20 동시호가 전 진입 · 익일 시초~9:05 전량 매도"]
     send_telegram("\n".join(lines))
     _jongga_sent["date"] = today
+    _save_sent_log()   # v2.19
     print(f"[종가베팅] {today} {len(candidates)}건 발송 완료")
 
 
