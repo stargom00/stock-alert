@@ -21,7 +21,7 @@ ALERTS_RAW = os.environ.get("ALERTS", "")
 MORNING_TICKERS = os.environ.get("MORNING_TICKERS", "")  # 아침 요약 종목 (예: AAPL;TSLA;005930.KS)
 SURGE_THRESHOLD = float(os.environ.get("SURGE_THRESHOLD", "5"))  # 급등락 기준 % (기본 5%)
 # 눌림목 스캐너 대기종목 API (피벗 돌파 감시용)
-SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback-production.up.railway.app")
+SCANNER_URL = os.environ.get("SCANNER_URL", "https://pullback2-production.up.railway.app")
 # v2.21: pullback이 APP_PASSWORD로 비공개 전환되면(v5.105) 이 봇이 폴링하는
 # 읽기 전용 API들은 세션 쿠키 대신 이 헤더로 통과한다(pullback의
 # _is_bot_read_path 허용목록과 정확히 일치해야 함). pullback이 아직 공개
