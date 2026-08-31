@@ -641,6 +641,33 @@ def handle_message(text, chat_id):
 
 MIN_SESSION_ELAPSED = 0.05   # 개장 후 이 미만(한국장 약 20분)이면 표본이 너무 적어 예상치 자체를 안 냄
 
+# v2.23: 거래량 확증 시간비례 외삽 편향 보정표 (KR 전용).
+# 실측: KR 29종목 x 59거래일(2026-06-05~2026-08-28, 5분봉 yfinance) = 1,682종목-일.
+# 값 = 그 경과시간(분)에서 naive 시간비례 외삽치가 실제 종가거래량의 몇 배였는지의 중앙값.
+# 전체 방법론·IQR·유동성구간 분석·6x6 예비표본과의 비교: pullback/docs/volume_confirm_bias_investigation.md
+# 재측정 시 이 딕셔너리 값만 교체하면 됨 — 주변 로직(보간·판정)은 안 건드려도 됨.
+# 미국장은 세션 구조가 달라 별도 실측 전까지 이 표를 적용하지 않는다(volume_confirm 참조).
+VOLUME_PROJECTION_BIAS = {
+    20: 3.27, 30: 2.75, 40: 2.43, 45: 2.31, 60: 2.07,
+    90: 1.80, 120: 1.61, 180: 1.33, 210: 1.25, 270: 1.14, 390: 1.00,
+}
+_BIAS_KEYS = sorted(VOLUME_PROJECTION_BIAS)
+
+
+def _bias_correction_factor(elapsed_min):
+    """VOLUME_PROJECTION_BIAS 앵커 사이를 선형보간해 경과시간(분)에 해당하는
+    편향 배수를 반환. 표 범위 밖이면 가장 가까운 끝값으로 clamp."""
+    if elapsed_min <= _BIAS_KEYS[0]:
+        return VOLUME_PROJECTION_BIAS[_BIAS_KEYS[0]]
+    if elapsed_min >= _BIAS_KEYS[-1]:
+        return VOLUME_PROJECTION_BIAS[_BIAS_KEYS[-1]]
+    for lo, hi in zip(_BIAS_KEYS, _BIAS_KEYS[1:]):
+        if lo <= elapsed_min <= hi:
+            v_lo, v_hi = VOLUME_PROJECTION_BIAS[lo], VOLUME_PROJECTION_BIAS[hi]
+            t = (elapsed_min - lo) / (hi - lo)
+            return v_lo + (v_hi - v_lo) * t
+    return 1.0  # 이론상 도달 불가(위 clamp가 먼저 걸림) — 방어용
+
 
 def _session_elapsed_ratio(now_kst):
     """한국장(09:00~15:30, 6.5h) 경과 비율. 장외/주말/개장 직후면 None(판정 불가).
@@ -692,7 +719,13 @@ def volume_confirm(ticker, cur_volume, now_kst):
 
     v2.15: 장외/주말/개장 직후에는 avg를 조회하기 전에 먼저 걸러서 "판정
     불가"를 바로 반환 — TWLO 사고(주말 KST 00:00에 "예상 1478%" 오발송)의
-    직접 원인이 여기(시간보정 분모가 잘못 계산됨)였음."""
+    직접 원인이 여기(시간보정 분모가 잘못 계산됨)였음.
+
+    v2.23: 시간비례 외삽 자체의 장초반 과대추정 편향을 KR에 한해 보정
+    (VOLUME_PROJECTION_BIAS/_bias_correction_factor 참조, 근거는
+    pullback/docs/volume_confirm_bias_investigation.md). 보정 후 값을
+    "추정"으로 표시하고 원시값을 괄호로 병기, 80분 이내는 장초반 경고
+    추가. 미국장은 별도 실측 전까지 기존 "예상" 원시값 그대로."""
     if not cur_volume:
         return None, False
     code = _kr_code(ticker)
@@ -719,14 +752,27 @@ def volume_confirm(ticker, cur_volume, now_kst):
     session_ratio = _session_elapsed_ratio(now_kst) if is_kr else _session_elapsed_ratio_us(now_kst)
     if session_ratio is None:
         return "⚪ 거래량 판정 불가 (장 시작 직후, 표본 부족)", False
-    ratio = (cur_volume / session_ratio) / avg
-    pct = int(ratio * 100)
-    if ratio >= 1.5:
-        tag = f"🟢 거래량 확증 (예상 {pct}%)"
-    elif ratio >= 1.0:
-        tag = f"🟡 거래량 애매 (예상 {pct}%)"
+    raw_ratio = (cur_volume / session_ratio) / avg
+    raw_pct = int(raw_ratio * 100)
+    if is_kr:
+        # v2.23: naive 시간비례 외삽은 장초반일수록 실제 종가거래량 대비
+        # 크게 과대추정한다(실측: 20분 경과 시 중앙값 3.27배) — VOLUME_PROJECTION_BIAS로
+        # 보정. 미국장은 세션 구조가 달라 별도 실측 전까지 원시값 그대로 둔다.
+        elapsed_min = now_kst.hour * 60 + now_kst.minute - 9 * 60
+        factor = _bias_correction_factor(elapsed_min)
+        ratio = raw_ratio / factor
+        pct = int(ratio * 100)
+        label = "추정"
+        raw_note = f" (원시 {raw_pct}%)"
+        early_warn = " (장초반 — 변동폭 큼)" if elapsed_min <= 80 else ""
     else:
-        tag = f"🔴 거래량 부족 (예상 {pct}%) — 가짜 돌파 의심"
+        ratio, pct, label, raw_note, early_warn = raw_ratio, raw_pct, "예상", "", ""
+    if ratio >= 1.5:
+        tag = f"🟢 거래량 확증 {label} {pct}%{raw_note}{early_warn}"
+    elif ratio >= 1.0:
+        tag = f"🟡 거래량 애매 {label} {pct}%{raw_note}{early_warn}"
+    else:
+        tag = f"🔴 거래량 부족 {label} {pct}%{raw_note} — 가짜 돌파 의심{early_warn}"
     return tag, True
 
 
@@ -1516,7 +1562,7 @@ def check_pivot_breakout():
                         lines.append(f"✅ 손절폭 {_sw:.1f}% (기준 {_lim:.0f}% 이내)")
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
-            # 거래량 확증 (v2.3): 실시간 누적 거래량 시간보정 → 예상 거래량비
+            # 거래량 확증 (v2.3, v2.23 편향보정): 실시간 누적 거래량 시간보정 → 추정 거래량비
             vtag, vok = volume_confirm(ticker, data.get("volume"), datetime.now(KST))
             lines.append("")
             if vok:
