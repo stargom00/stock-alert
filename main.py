@@ -73,6 +73,15 @@ _pivot_above = {}      # v2.15: {종목id: bool} — 마지막으로 확인했�
                        # 알림은 안 보냄 — 재시작 직후 이미 피벗 위인 종목 전체가 "신규 돌파"로
                        # 오인되는 걸 방지(이전 _pivot_fired 방식은 이 문제도 있었음: 재시작하면
                        # dict가 비어서 다음 폴링에 전원 재알림).
+# v2.24: 피벗가 정확히 그 값에서 호가 단위로 진동(5700/5700/5705/5710처럼
+# pivot 경계 위아래를 오가는 틱)하면, 단일 임계값(price >= pivot)만으로는
+# 매 폴링(1분)마다 위→아래→위 "전이"가 반복 발생해 같은 돌파가 몇 분 간격
+# (예: 14:00/14:03/14:16)으로 계속 재알림됨 — 글로벌텍스프리(204620.KQ)
+# 피벗 5,700 사고. 돌파 인정과 해제 인정에 서로 다른 임계값(밴드)을 둬서
+# 그 사이 구간에서는 이전 상태를 유지 — 경계 노이즈로는 전이가 안 일어나게.
+PIVOT_BREAK_UP_MULT = 1.003    # 아래→위 전이(진짜 돌파로 인정) — 피벗 대비 +0.3%
+PIVOT_BREAK_DOWN_MULT = 0.995  # 위→아래 전이(돌파 해제로 인정) — 피벗 대비 -0.5%
+                                # 시작값. 실제 알림 빈도 보고 조정.
 _pivot_state = {}      # v2.8: {종목id: {"pivot": float, "fired": "date", "retest_fired": bool}}
                        # 돌파 알림 후 리테스트(피벗 되돌림) 감시용.
                        # ⚠️ 메모리 저장 — 봇 재배포 시 리셋됨 (봇에 영구볼륨 없음, 선언된 한계)
@@ -707,7 +716,14 @@ def _session_elapsed_ratio_us(now_kst):
 
 def volume_confirm(ticker, cur_volume, now_kst):
     """돌파 거래량 확증 (v2.3): 실시간 누적 거래량을 시간보정해 예상 종가
-    거래량비 계산. 평균은 스캐너 /api/vol에서. 반환 (표시문자열, 신뢰여부).
+    거래량비 계산. 평균은 스캐너 /api/vol에서.
+    반환 (표시문자열, vol_data_available).
+    v2.24: 두 번째 값의 이름을 vok→vol_data_available로 정정. 이 값은
+    "거래량이 우호적(돌파에 확증적)"이라는 뜻이 아니라 "거래량 비율을
+    판정할 데이터가 있었는지"(장중/평균 조회 성공 여부)를 의미한다 —
+    실제 우호/비우호 등급(🟢/🟡/🔴)은 표시문자열(tag) 안에만 있음.
+    호출부는 이 값을 "판정 가능하면 tag를 보여주고, 아니면 안내 문구로
+    대체"하는 데만 쓴다 — 진입 가/부 판단에 쓰면 안 됨(그건 tag의 색으로).
 
     v2.9: 한국 전용이던 걸 미국 종목도 지원. 원인은 두 가지였음 —
     (1) _get_stock_data_yahoo가 애초에 실시간 누적 거래량(volume)을 안 돌려줘서
@@ -1526,8 +1542,16 @@ def check_pivot_breakout():
         # v2.15: 날짜 무관 상태전환 — 아래→위로 "다시" 올라올 때만 돌파 알림.
         # (자정에 날짜가 바뀌어도 이미 피벗 위였던 종목은 재알림되지 않음 —
         # 옛 _pivot_fired의 날짜 키 리셋 버그가 여기서 원천적으로 사라짐)
-        _now_above = price >= pivot
+        # v2.24: 히스테리시스 밴드 — pivot*DOWN ~ pivot*UP 사이는 "판단 보류"
+        # 구간으로 두고 직전 상태를 그대로 유지(전이 없음, 알림 없음). 경계
+        # 진동(위 주석 참조)으로 이 구간 안에서만 오가는 노이즈는 무시된다.
         _was_above = _pivot_above.get(wid)
+        if price >= pivot * PIVOT_BREAK_UP_MULT:
+            _now_above = True
+        elif price <= pivot * PIVOT_BREAK_DOWN_MULT:
+            _now_above = False
+        else:
+            _now_above = _was_above    # 밴드 안 — 상태 유지(전이 아님)
         _pivot_above[wid] = _now_above
         if _was_above is None:
             # 처음 관측(감시 등록 직후 or 봇 재시작 직후) — 상태만 기록하고
@@ -1563,9 +1587,11 @@ def check_pivot_breakout():
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
             # 거래량 확증 (v2.3, v2.23 편향보정): 실시간 누적 거래량 시간보정 → 추정 거래량비
-            vtag, vok = volume_confirm(ticker, data.get("volume"), datetime.now(KST))
+            # vol_data_available: 거래량이 우호적이라는 뜻이 아니라 판정 가능 여부일 뿐
+            # (v2.24, 옛 이름 vok가 "우호적"으로 오독되기 쉬웠음) — 우호/비우호 등급은 vtag 안에.
+            vtag, vol_data_available = volume_confirm(ticker, data.get("volume"), datetime.now(KST))
             lines.append("")
-            if vok:
+            if vol_data_available:
                 lines.append(vtag)
             else:
                 lines.append("⚠️ 거래량은 HTS에서 직접 확인 (전일 동시간 대비)")
