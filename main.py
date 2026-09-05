@@ -1003,10 +1003,23 @@ def check_market_gate():
         "<b>지수별</b>",
     ]
     idx = j.get("indices") or {}
+    # v2.25: 서버(pullback v5.163+)가 지수 조회 실패 시 직전 판정을 유지하며
+    # stale/stale_age_sec을 얹어 보낸다(성공 응답·구버전 서버엔 없음 → .get()
+    # 으로 안전하게 무시됨). 72h 초과 폴백은 stale 없이 indices[code]=None +
+    # why에 사유가 담겨온다.
+    stale = j.get("stale")
+    stale_age_sec = j.get("stale_age_sec") or 0
     for code in ("KOSPI", "KOSDAQ", "^GSPC", "^IXIC"):
         v = idx.get(code)
+        if v and stale:
+            prev_em = _GATE_EMOJI.get(v.get("gate"), "")[:2]
+            hours = stale_age_sec // 3600
+            lines.append(
+                f"· <b>{v['label']}</b> ⚪ 조회 실패 — 직전 {prev_em} 유지 ({hours}시간)"
+            )
+            continue
         if not v:
-            lines.append(f"· {code}: 조회 실패")
+            lines.append(f"· {code}: {j.get('why') or '조회 실패'}")
             continue
         d = v.get("dist_days")
         dtxt = "판정불가(거래량없음)" if d is None else f"분산 {d}개"
