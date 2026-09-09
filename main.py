@@ -3,10 +3,20 @@ from names import resolve_ticker
 import time
 import re
 import json
+import secrets
 import requests
 import schedule
 import pytz
 from datetime import datetime, timezone, timedelta
+
+# v2.28(사용자 지시 [2]): 컨테이너 중복 실행 진단용 인스턴스 식별자.
+# 2026-09-09 사고(오늘만 4회 재시작으로 +2R/+10R 중복 발송)를 조사하며
+# "얼마냐봇 시작!" 메시지가 실제로 중복인지 확인하는 게 관건이었는데,
+# PID만으로는 서로 다른 컨테이너가 같은 값(예: 1)을 우연히 쓸 수 있어
+# (각자 별도 리눅스 네임스페이스) 식별력이 약함 — 짧은 랜덤 태그를
+# 같이 찍어 두 컨테이너가 동시에 뜨면 "시작!" 메시지의 태그가 서로
+# 달라 바로 구분된다.
+INSTANCE_ID = f"pid{os.getpid()}-{secrets.token_hex(3)}"
 
 KST = timezone(timedelta(hours=9))
 # v2.15: US 장시간 판정용 — 서머타임 자동 반영(고정 오프셋이 아니라
@@ -131,7 +141,7 @@ def parse_alerts():
 
 alerts, _alert_problems = parse_alerts()
 prev_prices = {}
-print(f"[시작] 총 {len(alerts)}개 알림 설정됨")
+print(f"[시작] 인스턴스 {INSTANCE_ID} · 총 {len(alerts)}개 알림 설정됨")
 if _alert_problems:
     print(f"[시작 경고] ALERTS 무시/의심 항목 {len(_alert_problems)}개 — 텔레그램으로 별도 발송 예정")
 
@@ -794,7 +804,14 @@ def volume_confirm(ticker, cur_volume, now_kst):
 
 
 _pivot_near = set()      # 접근 예고 발송 기록
-_pos_fired = {}          # {포지션id: {'stop', '2R', '3R', ...}} 발송 기록 (재시작 시 초기화)
+# v2.28(사용자 지시 — 2026-09-09 사고 수정): {포지션id: {"date": 마지막
+# 관측 날짜, "ticker":.., "stages": {'stop','2R','3R',...}}} 발송 기록.
+# 예전엔 순수 in-memory라(값도 set뿐) 오늘처럼 4회 재시작하면 그때마다
+# 빈 dict로 리셋 → 여전히 +2R 위인 살아있는 포지션이 "처음 보는 상태"로
+# 오인돼 +2R/+10R이 중복 발송됐다(3:18/3:21 두 번씩, 컨테이너 중복
+# 아님 — INSTANCE_ID로 확정). 이제 _save_sent_log()로 파일 영속 +
+# 재시작 시 복원(파일 하단 _sent_log_loaded 복원부 참고).
+_pos_fired = {}
 _pos_last_price = {}     # {포지션id: 직전 폴링(2분 전) 가격} — 급락 감지용 (v2.12)
 _pos_last_price_time = {}  # {포지션id: 위 가격을 관측한 시각} — v2.15, 장외 갭 오탐 방지용
 _flash_fired = {}        # {포지션id: 마지막 급락 알림 시각} — 같은 하락에 반복 알림 방지 (재시작 시 초기화)
@@ -811,6 +828,7 @@ def check_positions():
     R마일스톤과 달리 "짧은 시간 급변"이 신호라 며칠에 걸친 하락과는 구분해야 해서
     직전 폴링 가격(_pos_last_price)과만 비교한다 — entry/stop 대비가 아님."""
     now = datetime.now(KST).strftime("%H:%M:%S")
+    today = datetime.now(KST).strftime("%Y-%m-%d")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/positions", timeout=10, headers=_SCANNER_HEADERS)
         positions = res.json().get("positions", [])
@@ -839,7 +857,9 @@ def check_positions():
         price = data["price"]
         cur = data["currency"]
         name = p.get("name") or ticker
-        fired = _pos_fired.setdefault(pid, set())
+        rec = _pos_fired.setdefault(pid, {"date": today, "ticker": ticker, "stages": set()})
+        rec["date"] = today   # 관측될 때마다 갱신 — 아래 정리(살아있는 목록에 없으면 삭제)의 근거
+        fired = rec["stages"]
         r_now = (price - entry) / (entry - stop)
 
         # 🔻 급락 감지 (v2.12): 직전 폴링(2분 전) 대비 -5% 이상 하락.
@@ -873,6 +893,7 @@ def check_positions():
         # 🛑 손절가 터치
         if price <= stop and "stop" not in fired:
             fired.add("stop")
+            _save_sent_log()   # v2.28
             send_telegram("\n".join([
                 "🛑 <b>손절가 도달 — 실행하세요</b>",
                 "",
@@ -888,6 +909,7 @@ def check_positions():
         # 💰 +2R: 절반 익절 + 본전 이동
         if r_now >= 2 and "2R" not in fired:
             fired.add("2R")
+            _save_sent_log()   # v2.28
             send_telegram("\n".join([
                 "💰 <b>+2R 도달 — 절반 익절 + 손절 본전 이동</b>",
                 "",
@@ -908,6 +930,7 @@ def check_positions():
             ms = f"{int(r_now)}R"
             if ms not in fired:
                 fired.add(ms)
+                _save_sent_log()   # v2.28
                 send_telegram("\n".join([
                     f"🏔 <b>+{int(r_now)}R 마일스톤</b> — 러너가 달리는 중",
                     "",
@@ -917,6 +940,18 @@ def check_positions():
                     "행동: 없음. 10/21일선 종가 이탈 전까지 보유.",
                 ]))
                 print(f"  🏔 {name} +{int(r_now)}R")
+
+    # v2.28(사용자 지시 [1] "하루 지나면 정리"): 날짜 경과 대신 "지금 살아있는
+    # 목록에 없음"을 기준으로 정리 — pid는 저널 id(생성 시각 기반)라 재사용
+    # 안 되므로 재등장 오판 위험이 없고, 날짜 유예(예: 1일)를 두면 연휴
+    # 동안 열려있던 포지션까지 잘못 지워질 수 있어(장이 안 열려 관측 자체가
+    # 없었을 뿐) 더 안전하다. 응답 자체가 성공했을 때만(이 지점 도달) 비교.
+    live_pids = {pp.get("id") for pp in positions if pp.get("id")}
+    stale_pids = [k for k in _pos_fired if k not in live_pids]
+    if stale_pids:
+        for k in stale_pids:
+            del _pos_fired[k]
+        _save_sent_log()
 
 
 _gate_last = {"suggest": None}
@@ -1155,6 +1190,7 @@ def check_distribution():
         if not j.get("ok") or j.get("level") != "danger":
             continue
         _dist_fired[pid] = today
+        _save_sent_log()   # v2.28
         name = p.get("name") or ticker
         sigs = j.get("signals", [])
         detail = j.get("detail", {})
@@ -1227,6 +1263,7 @@ def check_ma_break():
         if not broke:
             continue
         _ma_break_fired[pid] = today
+        _save_sent_log()   # v2.28
         line, maval = broke
         send_telegram("\n".join([
             f"📉 <b>{line} 이탈 — 트레일링 손절 검토</b>",
@@ -1283,6 +1320,7 @@ def check_ma_near():
         if not near:
             continue
         _ma_near_fired[ticker] = today
+        _save_sent_log()   # v2.28
         line, maval, d = near
         _lines = [
             f"🎯 <b>{line} 지지 접근 — 관찰</b>",
@@ -1459,6 +1497,7 @@ def check_pullback_support():
             continue     # 아직 근접 전
 
         _pullback_fired[wid] = today
+        _save_sent_log()   # v2.28
         name = w.get("name") or ticker
         cur = "KRW" if _kr_code(ticker) else "USD"
         close = sig.get("close")
@@ -1605,6 +1644,7 @@ def check_pivot_breakout():
             # 목표까지 +2% 이내로 근접하면 알림 (딱 도달 전에 준비)
             if price <= tb * 1.02:
                 _target_fired.add(wid)
+                _save_sent_log()   # v2.28
                 name = w.get("name") or ticker
                 cur = data["currency"]
                 stop = w.get("stop")
@@ -1626,6 +1666,7 @@ def check_pivot_breakout():
                 print(f"  🎯 {name} 목표가 도달 {price} ≤ {tb}")
         if wid not in _pivot_near and pivot * 0.99 <= price < pivot:
             _pivot_near.add(wid)
+            _save_sent_log()   # v2.28
             name = w.get("name") or ticker
             cur = data["currency"]
             _lines = [
@@ -1706,6 +1747,18 @@ def check_pivot_breakout():
             send_telegram("\n".join(lines))
             print(f"  🚀 {name} 피벗돌파 {price} >= {pivot}")
 
+    # v2.28(사용자 지시 [1][3]): _target_fired/_pivot_near 정리 — 대기목록
+    # (pending)에서 사라진 wid는 이미 진입 전환됐거나 관찰 종료된 것이라
+    # 더 지켜볼 이유가 없다. _pos_fired와 같은 "지금 살아있는 목록에
+    # 없으면 삭제" 기준(날짜 유예 없음 — pending 이탈은 즉시 확정적 사실).
+    live_wids = {ww.get("id") for ww in pending if ww.get("id")}
+    _stale_target = _target_fired - live_wids
+    _stale_near = _pivot_near - live_wids
+    if _stale_target or _stale_near:
+        _target_fired -= _stale_target
+        _pivot_near -= _stale_near
+        _save_sent_log()
+
 
 def check_alerts():
     now = datetime.now(KST).strftime("%H:%M:%S")
@@ -1754,6 +1807,7 @@ def check_opening_surge():
         print(f"[장초반 급증] 조회 실패: {e}")
         return
     _opening_surge_fired_date = today
+    _save_sent_log()   # v2.28
     if not hits:
         print("[장초반 급증] 급증 종목 없음")
         return
@@ -1778,13 +1832,20 @@ def check_opening_surge():
 
 
 # ── 발송 기록 파일 저장 (v2.19, 사용자 지시) ──────────────────────────
-# _moneyflow_sent/_jongga_sent만 파일로 옮긴다(다른 _*_fired류는 그대로
-# in-memory — 요청 범위가 이 둘로 한정됨, 포지션/피벗류는 재시작하면
-# 어차피 포지션 자체를 다시 불러오면서 자연 복구되는 구조라 지금은
-# 손 안 댐). Railway 볼륨(DATA_DIR 환경변수, 웹서비스처럼 볼륨 마운트가
-# 있으면) 우선, 없으면 /tmp — worker dyno라 재배포 시 컨테이너가
-# 새로 뜨는 건 pullback과 동일하지만, 최소한 "같은 배포 안에서 재시작"
-# (크래시 후 자동 재기동 등)에는 살아남아 그 사이의 중복 발송을 막는다.
+# v2.28(사용자 지시 — 2026-09-09 사고 수정): 애초 "포지션/피벗류는
+# 재시작하면 어차피 자연 복구된다"고 판단해 _moneyflow_sent/_jongga_sent
+# 만 파일화했었는데, 그 "자연 복구"가 실제로는 "다 잊어버리고 다시 판정을
+# 시작한다"는 뜻이었다 — R마일스톤처럼 조건이 여러 폴링에 걸쳐 계속
+# 참인 종류는 재시작마다 "새로 발견"돼 중복 발송으로 이어졌다(오늘
+# 4회 재시작 · +2R/+10R 중복 발송 실사고, 컨테이너 중복은 INSTANCE_ID로
+# 배제 확인). 이제 "이미 보냈다" 기록류 전부를 이 파일에 같이 저장한다
+# (전수 확인 결과는 각 dict 선언부 주석 참고 — _gate_last/_pivot_above/
+# _pivot_state는 "재시작 시 처음 관측으로 취급해 알림을 안 보냄"이라는
+# 자체 안전장치가 이미 있어 이 부류의 버그가 없음, 그대로 둠).
+# Railway 볼륨(DATA_DIR 환경변수, 웹서비스처럼 볼륨 마운트가 있으면)
+# 우선, 없으면 /tmp — worker dyno라 재배포 시 컨테이너가 새로 뜨는 건
+# pullback과 동일하지만, 최소한 "같은 배포 안에서 재시작"(크래시 후
+# 자동 재기동 등)에는 살아남아 그 사이의 중복 발송을 막는다.
 def _sent_log_path():
     d = os.environ.get("DATA_DIR", "/tmp")
     try:
@@ -1812,9 +1873,25 @@ def _save_sent_log():
     try:
         tmp = _SENT_LOG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent,
-                    "toss_sync_sent": _toss_sync_sent,
-                    "my_tracker_sent": _my_tracker_sent}, f, ensure_ascii=False)   # v2.26
+            json.dump({
+                "moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent,
+                "toss_sync_sent": _toss_sync_sent,
+                "my_tracker_sent": _my_tracker_sent,   # v2.26
+                # v2.28: dict key(pid/wid)는 원래 int지만 JSON object key는
+                # 항상 문자열로 직렬화된다 — 복원 시 _restore_id_keyed()가
+                # 다시 int로 되돌린다(안 하면 실시간 int 키와 안 맞아
+                # 복원된 기록이 조용히 무시됨).
+                "pos_fired": {str(pid): {"date": rec.get("date"), "ticker": rec.get("ticker"),
+                                          "stages": list(rec.get("stages") or [])}
+                              for pid, rec in _pos_fired.items()},
+                "target_fired": list(_target_fired),
+                "pivot_near": list(_pivot_near),
+                "ma_near_fired": _ma_near_fired,     # 티커(문자열) 키라 변환 불필요
+                "pullback_fired": _pullback_fired,
+                "dist_fired": _dist_fired,
+                "ma_break_fired": _ma_break_fired,
+                "opening_surge_fired_date": _opening_surge_fired_date,
+            }, f, ensure_ascii=False)
         os.replace(tmp, _SENT_LOG_PATH)
     except OSError as e:
         print(f"[발송기록] 저장 실패: {e}")
@@ -1938,6 +2015,43 @@ def check_jongga():
 _toss_sync_sent = {}   # v2.20: {ip: 마지막으로 발송한 날짜(YYYY-MM-DD)} — 같은 IP 하루 1회만.
 _toss_sync_sent.update(_sent_log_loaded.get("toss_sync_sent") or {})   # v2.20: 재시작 후 복원
 _my_tracker_sent.update(_sent_log_loaded.get("my_tracker_sent") or {})   # v2.26: 재시작 후 복원
+
+
+# v2.28(사용자 지시 [1][3] — 2026-09-09 사고 수정): pid/wid는 원래 int인데
+# JSON object key는 항상 문자열로 저장되므로, 복원 시 되돌리지 않으면
+# 실시간 코드의 int 키(예: p.get("id"))와 안 맞아 복원된 기록이 조용히
+# 무시된다(파일엔 있는데 dedup은 다시 처음부터 — 딱 오늘 사고와 같은
+# 증상이 재발). 정수로 안 바뀌는 키(비정상 데이터)는 원문 그대로 둔다.
+def _restore_id_keyed(d):
+    out = {}
+    for k, v in (d or {}).items():
+        try:
+            out[int(k)] = v
+        except (TypeError, ValueError):
+            out[k] = v
+    return out
+
+
+for _pid, _rec in (_sent_log_loaded.get("pos_fired") or {}).items():
+    try:
+        _pid_key = int(_pid)
+    except (TypeError, ValueError):
+        _pid_key = _pid
+    _pos_fired[_pid_key] = {"date": _rec.get("date"), "ticker": _rec.get("ticker"),
+                             "stages": set(_rec.get("stages") or [])}
+_target_fired.update(_sent_log_loaded.get("target_fired") or [])   # 리스트 원소는 JSON 왕복해도 int 유지(딕셔너리 키만 문자열화됨)
+_pivot_near.update(_sent_log_loaded.get("pivot_near") or [])
+_ma_near_fired.update(_sent_log_loaded.get("ma_near_fired") or {})   # 티커(문자열) 키라 변환 불필요
+_pullback_fired.update(_restore_id_keyed(_sent_log_loaded.get("pullback_fired")))
+_dist_fired.update(_restore_id_keyed(_sent_log_loaded.get("dist_fired")))
+_ma_break_fired.update(_restore_id_keyed(_sent_log_loaded.get("ma_break_fired")))
+if _sent_log_loaded.get("opening_surge_fired_date"):
+    _opening_surge_fired_date = _sent_log_loaded["opening_surge_fired_date"]
+if _sent_log_loaded:
+    print(f"[발송기록] 복원(v2.28): pos_fired={len(_pos_fired)} target_fired={len(_target_fired)} "
+          f"pivot_near={len(_pivot_near)} ma_near_fired={len(_ma_near_fired)} "
+          f"pullback_fired={len(_pullback_fired)} dist_fired={len(_dist_fired)} "
+          f"ma_break_fired={len(_ma_break_fired)} opening_surge_fired_date={_opening_surge_fired_date}")
 
 
 def check_toss_sync():
@@ -2140,7 +2254,11 @@ send_telegram(
     "📌 모니터링 중인 종목:\n" +
     "\n".join([f"• {a['ticker']} {'이상' if a['condition']=='above' else '이하'} {a['target']}" for a in alerts]) +
     f"\n⚡ 급등락 기준: ±{SURGE_THRESHOLD}%\n"
-    f"🚀 피벗 돌파 감시: 일지 대기종목 {_pending_cnt}개 (1분마다)\n\n"
+    f"🚀 피벗 돌파 감시: 일지 대기종목 {_pending_cnt}개 (1분마다)\n"
+    # v2.28(사용자 지시 [2]): 이 시각 근처에 "시작!" 메시지가 두 번 오면
+    # 컨테이너 중복 실행 — 인스턴스ID가 다르면 확정, 같으면(우연 X) 다른
+    # 원인(예: 발송 로직 자체의 중복 호출)부터 의심.
+    f"🔖 인스턴스: <code>{INSTANCE_ID}</code>\n\n"
     "💬 사용방법이 궁금하면 <code>알려줘</code> 라고 보내주세요!"
 )
 
