@@ -566,6 +566,7 @@ HELP_MESSAGE = (
     "• 목표가 도달 알림 (30초마다 확인)\n"
     "• 급등락 알림 (5분마다 확인)\n"
     "• 🚀 일지 대기종목 피벗 돌파 알림 (1분마다 확인)\n"
+    "• 📌 내 추적 트리거 도달 알림 (장중 2분마다 확인, v2.26)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -1297,6 +1298,84 @@ def check_ma_near():
         send_telegram("\n".join(_lines))
         print(f"  🎯 {name} {line} 접근 ({d:+.1f}%)")
 
+    # v2.26(사용자 지시 — [3] "새 스케줄러 만들지 마라"): 별도
+    # schedule.every()를 등록하지 않고 이미 장중 2분마다 도는 이 함수에
+    # 얹는다 — 요청된 15분 간격보다 촘촘하지만(더 빠른 감지일 뿐, 문제
+    # 없음) 새 주기를 만들지 않는다는 지시를 그대로 따른 것.
+    check_my_tracker()
+
+
+# ── 📌 내 추적 트리거 알림 (v2.26) ──────────────────────────────
+# pullback 저널의 my_trigger_price/my_trigger_dir(pullback v5.220)을
+# 읽어 방향에 맞게 도달하면 1회 발송. 대상은 "📌 내 추적" 보드가 보여주는
+# 것과 정확히 같음(status가 pending 또는 watch이고 my_trigger_price가
+# 있는 레코드 전부) — 관찰 종료(status가 다른 값으로 바뀜)되면 다음
+# 폴링부터 자동으로 대상에서 빠진다(매번 /api/journal을 새로 읽으므로
+# 별도 취소 로직 불필요, 사용자 지시 [2] 후반부).
+_my_tracker_sent = {}   # v2.26: {ticker: 마지막 발송 날짜(YYYY-MM-DD)} — 종목당 하루 1회.
+# 재시작 후 복원(.update)은 파일 하단에서 _sent_log_loaded가 정의된 뒤
+# 한다 — 여기서 바로 부르면 아직 없는 이름이라 NameError(모듈 최상단
+# 코드는 위→아래로 순서대로 실행됨, 함수 본문과 달리 늦은 바인딩이 아님).
+
+
+def check_my_tracker():
+    """check_ma_near()(장중 2분 주기)에 얹혀서 같이 돈다 — 직접 호출하는
+    스케줄 등록은 없음. KR/US 세션 판정은 기존 _kr_market_open/
+    _us_market_open 그대로 재사용(사용자 지시 [3]의 시간대와 정확히
+    일치 — KR 09:00~15:30 KST, US는 09:30~16:00 ET를 KST로 환산하면
+    서머타임 포함 22:30~05:00대)."""
+    now = datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/journal", timeout=15, headers=_SCANNER_HEADERS)
+        journal = res.json()
+        if not isinstance(journal, list):
+            return
+    except Exception as e:
+        print(f"[내추적] 저널 조회 실패: {e}")
+        return
+
+    for r in journal:
+        ticker = r.get("ticker")
+        trigger = r.get("my_trigger_price")
+        status = r.get("status") or "entered"
+        if not ticker or trigger is None or status not in ("pending", "watch"):
+            continue
+        if _my_tracker_sent.get(ticker) == today:
+            continue
+        is_kr = bool(_kr_code(ticker))
+        if not (_kr_market_open(now) if is_kr else _us_market_open(now)):
+            continue
+        d = get_stock_data(ticker)
+        if not d:
+            continue
+        price = d["price"]
+        currency = d["currency"]
+        direction = "below" if r.get("my_trigger_dir") == "below" else "above"   # 기본 above(v5.220과 동일 마이그레이션 규칙)
+        reached = (price <= trigger) if direction == "below" else (price >= trigger)
+        if not reached:
+            continue
+        _my_tracker_sent[ticker] = today
+        _save_sent_log()   # v2.26
+        name = r.get("name") or ticker
+        arrow = "▼이하" if direction == "below" else "▲이상"
+        lines = [
+            f"📌 <b>{name} 도달</b>",
+            f"{format_price(trigger, currency)} {arrow} → 현재 {format_price(price, currency)}",
+        ]
+        sc = r.get("scenario")
+        if sc and sc.get("levels"):
+            lv = sc["levels"]
+            parts = []
+            if lv.get("support") is not None:
+                parts.append(f"지지 {format_price(lv['support'], currency)}")
+            if lv.get("invalidation") is not None:
+                parts.append(f"무효 {format_price(lv['invalidation'], currency)}")
+            if parts:
+                lines.append(" / ".join(parts))
+        send_telegram("\n".join(lines))
+        print(f"  📌 {name} 트리거 도달({direction}) {price} vs {trigger}")
+
 
 # ── 눌림 지지 진입 알림 (v2.14) ──────────────────────────────
 # 기존 🚀피벗돌파와 별개의 알림 유형. RS90+ · U/D1.5+ · 주봉10EMA ±2% 이내인
@@ -1723,7 +1802,8 @@ def _save_sent_log():
         tmp = _SENT_LOG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"moneyflow_sent": _moneyflow_sent, "jongga_sent": _jongga_sent,
-                    "toss_sync_sent": _toss_sync_sent}, f, ensure_ascii=False)
+                    "toss_sync_sent": _toss_sync_sent,
+                    "my_tracker_sent": _my_tracker_sent}, f, ensure_ascii=False)   # v2.26
         os.replace(tmp, _SENT_LOG_PATH)
     except OSError as e:
         print(f"[발송기록] 저장 실패: {e}")
@@ -1846,6 +1926,7 @@ def check_jongga():
 
 _toss_sync_sent = {}   # v2.20: {ip: 마지막으로 발송한 날짜(YYYY-MM-DD)} — 같은 IP 하루 1회만.
 _toss_sync_sent.update(_sent_log_loaded.get("toss_sync_sent") or {})   # v2.20: 재시작 후 복원
+_my_tracker_sent.update(_sent_log_loaded.get("my_tracker_sent") or {})   # v2.26: 재시작 후 복원
 
 
 def check_toss_sync():
@@ -1865,6 +1946,14 @@ def check_toss_sync():
         j = res.json()
     except Exception as e:
         print(f"[토스동기화] 조회 실패: {e}")
+        return
+    # v2.26: pullback v5.222부터 TOSS_SYNC_ENABLED=false면 동기화 자체를
+    # 서버가 안 돌린다(의도적 비활성 — 실패가 아님). 그 상태에선 성공적인
+    # 재동기화가 다시는 안 일어나 sync_error가 영원히 안 지워지므로,
+    # sync_enabled 필드(false일 때만 명시적으로 내려옴, 구버전 응답은
+    # 필드 자체가 없어 None → 기존처럼 동작)로 걸러 매일 두 번 헛알림
+    # 나가는 걸 막는다.
+    if j.get("sync_enabled") is False:
         return
     err = j.get("sync_error")
     if not err:
