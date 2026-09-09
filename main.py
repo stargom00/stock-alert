@@ -1251,7 +1251,9 @@ def check_ma_near():
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
         pending = res.json().get("pending", [])
-    except Exception:
+    except Exception as e:
+        # v2.27(사용자 지시 [2]): 조용한 실패 금지 — 사유·시각 로그.
+        print(f"[관찰접근] /api/watch/pending 조회 실패 ({now.strftime('%H:%M:%S')}): {e}")
         return
     for w in pending:
         ticker = w.get("ticker")
@@ -1298,11 +1300,11 @@ def check_ma_near():
         send_telegram("\n".join(_lines))
         print(f"  🎯 {name} {line} 접근 ({d:+.1f}%)")
 
-    # v2.26(사용자 지시 — [3] "새 스케줄러 만들지 마라"): 별도
-    # schedule.every()를 등록하지 않고 이미 장중 2분마다 도는 이 함수에
-    # 얹는다 — 요청된 15분 간격보다 촘촘하지만(더 빠른 감지일 뿐, 문제
-    # 없음) 새 주기를 만들지 않는다는 지시를 그대로 따른 것.
-    check_my_tracker()
+    # v2.27(사용자 지시 [1]): check_my_tracker()는 여기 얹지 않고 별도
+    # schedule.every(2).minutes로 분리 등록(파일 하단). v2.26 당시엔 "새
+    # 스케줄러 만들지 마라"는 지시로 여기 얹었으나, /api/watch/pending
+    # 실패 시 이 함수가 조용히 return(바로 아래 except)해버려서 내 추적
+    # 체크까지 같이 막히는 게 발견돼 분리함.
 
 
 # ── 📌 내 추적 트리거 알림 (v2.26) ──────────────────────────────
@@ -1319,10 +1321,11 @@ _my_tracker_sent = {}   # v2.26: {ticker: 마지막 발송 날짜(YYYY-MM-DD)} �
 
 
 def check_my_tracker():
-    """check_ma_near()(장중 2분 주기)에 얹혀서 같이 돈다 — 직접 호출하는
-    스케줄 등록은 없음. KR/US 세션 판정은 기존 _kr_market_open/
-    _us_market_open 그대로 재사용(사용자 지시 [3]의 시간대와 정확히
-    일치 — KR 09:00~15:30 KST, US는 09:30~16:00 ET를 KST로 환산하면
+    """v2.27부터 독립 스케줄(파일 하단 schedule.every(2).minutes)로 직접
+    돈다 — check_ma_near()의 /api/watch/pending 실패가 이 체크까지 막는
+    문제(v2.26 때는 얹혀 있었음)를 없애기 위해 분리(사용자 지시 [1]).
+    KR/US 세션 판정은 기존 _kr_market_open/_us_market_open 그대로
+    재사용(KR 09:00~15:30 KST, US는 09:30~16:00 ET를 KST로 환산하면
     서머타임 포함 22:30~05:00대)."""
     now = datetime.now(KST)
     today = now.strftime("%Y-%m-%d")
@@ -1330,11 +1333,14 @@ def check_my_tracker():
         res = requests.get(f"{SCANNER_URL}/api/journal", timeout=15, headers=_SCANNER_HEADERS)
         journal = res.json()
         if not isinstance(journal, list):
+            print(f"[내추적] 저널 응답이 리스트가 아님 ({now.strftime('%H:%M:%S')}): {type(journal)}")
             return
     except Exception as e:
-        print(f"[내추적] 저널 조회 실패: {e}")
+        print(f"[내추적] 저널 조회 실패 ({now.strftime('%H:%M:%S')}): {e}")
         return
 
+    checked = 0
+    reached_count = 0
     for r in journal:
         ticker = r.get("ticker")
         trigger = r.get("my_trigger_price")
@@ -1349,12 +1355,14 @@ def check_my_tracker():
         d = get_stock_data(ticker)
         if not d:
             continue
+        checked += 1
         price = d["price"]
         currency = d["currency"]
         direction = "below" if r.get("my_trigger_dir") == "below" else "above"   # 기본 above(v5.220과 동일 마이그레이션 규칙)
         reached = (price <= trigger) if direction == "below" else (price >= trigger)
         if not reached:
             continue
+        reached_count += 1
         _my_tracker_sent[ticker] = today
         _save_sent_log()   # v2.26
         name = r.get("name") or ticker
@@ -1375,6 +1383,9 @@ def check_my_tracker():
                 lines.append(" / ".join(parts))
         send_telegram("\n".join(lines))
         print(f"  📌 {name} 트리거 도달({direction}) {price} vs {trigger}")
+
+    # v2.27(사용자 지시 [3]): 도달 0건이어도 "돌았다"는 사실 자체를 로그로 남김.
+    print(f"[내추적] {now.strftime('%H:%M:%S')} 조회 {checked}건 · 도달 {reached_count}건")
 
 
 # ── 눌림 지지 진입 알림 (v2.14) ──────────────────────────────
@@ -2149,6 +2160,7 @@ schedule.every().day.at("16:10", "Asia/Seoul").do(check_distribution)  # 분산 
 schedule.every().day.at("16:10", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (종가 확정 후)
 schedule.every(2).minutes.do(check_ma_near)                            # 관찰 이평 접근 (v2.5, 장중)
 schedule.every(2).minutes.do(check_pullback_support)                   # 눌림 지지 진입 (v2.14, 장중)
+schedule.every(2).minutes.do(check_my_tracker)                         # 내 추적 트리거 도달 (v2.27, check_ma_near에서 분리)
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
