@@ -1552,6 +1552,13 @@ def check_pivot_breakout():
     상태전환 방식으로 교체해 "아래→위 전이"만 알림으로 인정(2, 날짜 무관).
     부수 효과: 봇 재시작 직후에도 이미 피벗 위인 종목 전체가 "신규 돌파"로
     오인되던 문제가 같이 해결됨(처음 관측한 종목은 알림 없이 상태만 기록)."""
+    # v2.29(버그수정): 아래 "_target_fired -= _stale_target" /
+    # "_pivot_near -= _stale_near"(v2.28에서 추가)가 global 선언 없이
+    # 들어가면서, 파이썬이 이 함수 전체에서 두 이름을 로컬 변수로 컴파일 —
+    # pending 항목 전부가 이 둘에 닿기 전에 continue되는 사이클마다
+    # UnboundLocalError로 크래시(1분 주기 스케줄이라 봇이 계속 재시작됨).
+    # 두 이름 다 선언해야 한다 — 하나만 고치면 바로 다음 줄에서 같은 이유로 죽는다.
+    global _target_fired, _pivot_near
     now = datetime.now(KST).strftime("%H:%M:%S")
     try:
         res = requests.get(f"{SCANNER_URL}/api/watch/pending", timeout=10, headers=_SCANNER_HEADERS)
