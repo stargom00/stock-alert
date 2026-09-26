@@ -427,6 +427,24 @@ def _naver_index_trading_value(symbol):
     return None
 
 
+def _naver_index_base_date(symbol):
+    """v2.30 — 네이버 지수 basic의 localTradedAt(지수 마지막 체결 시각)에서
+    데이터 기준일 'YYYY-MM-DD'를 꺼낸다. 실패 시 None.
+    배경: 휴장일(2026-09-24·25 추석)에도 네이버는 직전 거래일(09-23) 누적
+    거래대금을 그대로 주는데, 리포트 제목에 발송일을 찍어 "오늘 거래대금"
+    처럼 보냈다. 휴장일 목록을 따로 두지 않고 데이터 자체의 날짜로 판정."""
+    try:
+        res = requests.get(f"https://m.stock.naver.com/api/index/{symbol}/basic",
+                           headers=_NAVER_HEADERS, timeout=10)
+        if res.status_code != 200:
+            return None
+        ts = str(res.json().get("localTradedAt") or "")
+        return ts[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", ts) else None
+    except Exception as e:
+        print(f"[네이버 지수 기준일 조회 오류] {symbol}: {e}")
+        return None
+
+
 def get_market_trading_value():
     """코스피/코스닥 거래대금 — 네이버 금융에서 조회.
     반환: {"date","kospi_value","kosdaq_value"} (원 단위) 또는 None.
@@ -448,8 +466,12 @@ def get_market_trading_value():
     if kospi_raw is None or kosdaq_raw is None:
         return None
 
+    # v2.30: 발송일이 아니라 네이버 데이터 기준일(YYYY-MM-DD). 못 얻으면 None.
+    base_date = _naver_index_base_date("KOSPI") or _naver_index_base_date("KOSDAQ")
+    print(f"[네이버 거래대금 기준일] {base_date}")
+
     return {
-        "date": datetime.now(KST).strftime("%Y%m%d"),
+        "date": base_date,
         "kospi_value": int(kospi_raw * _UNIT_MULTIPLIER),
         "kosdaq_value": int(kosdaq_raw * _UNIT_MULTIPLIER),
     }
@@ -484,11 +506,25 @@ def format_trillion(won):
     return f"{eok:,.0f}억원"
 
 
-def trading_value_report():
-    """코스피/코스닥/업비트 거래대금 리포트 발송."""
-    msg = f"💰 <b>일일 거래대금</b> ({datetime.now(KST).strftime('%Y-%m-%d')})\n"
-    msg += "<i>KRX 기준 (NXT 미포함)</i>\n\n"
+def trading_value_report(scheduled=False):
+    """코스피/코스닥/업비트 거래대금 리포트 발송.
+    v2.30: 제목 날짜 = 네이버 데이터 기준일. 스케줄 발송(scheduled=True)은
+    기준일이 오늘이 아니면(휴장) 발송 안 함. 수동 조회는 보내되 "휴장 —
+    최근 거래일" 표기. 기준일을 못 얻으면 발송은 하고 그 사실을 표기
+    (날짜 조회 실패로 거래일 리포트까지 조용히 사라지는 걸 막음)."""
+    today = datetime.now(KST).strftime("%Y-%m-%d")
     mv = get_market_trading_value()
+    base_date = mv.get("date") if mv else None
+    if scheduled and base_date and base_date != today:
+        print(f"[거래대금 스케줄] 네이버 기준일 {base_date} ≠ 오늘 {today} — 휴장, 발송 안 함")
+        return
+    msg = f"💰 <b>일일 거래대금</b> ({base_date or today})\n"
+    msg += "<i>KRX 기준 (NXT 미포함)</i>\n"
+    if mv and base_date and base_date != today:
+        msg += f"<i>휴장 — 최근 거래일 {base_date} 기준</i>\n"
+    elif mv and not base_date:
+        msg += "<i>기준일 확인 불가 — 네이버 데이터 날짜 조회 실패</i>\n"
+    msg += "\n"
     if mv:
         total = mv["kospi_value"] + mv["kosdaq_value"]
         msg += f"📊 <b>코스피</b>: {format_trillion(mv['kospi_value'])}\n"
@@ -507,7 +543,7 @@ def scheduled_trading_value_report():
     if datetime.now(KST).weekday() >= 5:   # 5=토, 6=일
         print(f"[거래대금 스케줄] 주말이라 건너뜀")
         return
-    trading_value_report()
+    trading_value_report(scheduled=True)   # v2.30: 평일 휴장은 데이터 기준일로 판정
 
 def send_telegram(message, chat_id=None):
     if not TELEGRAM_TOKEN:
@@ -1149,12 +1185,13 @@ def weekly_report():
     print("[주간리포트] 발송")
 
 
-_dist_fired = {}         # {포지션id: 마지막 경고 날짜} — 하루 1회만
+_dist_fired = {}         # {포지션id: 마지막 경고한 봉 날짜(v2.30, 이전엔 발송일)} — 봉당 1회만
 
 
 def check_distribution():
     """보유 종목 분산(매도) 신호 감시 (v2.4) — 매일 16:10 KST(종가 확정 후).
-    진입 종목이 분산 danger면 ⚠️ 알림. 같은 종목 하루 1회만.
+    진입 종목이 분산 danger면 ⚠️ 알림. 같은 종목 봉당 1회만(v2.30 — 평가한
+    봉 날짜 키, 이전엔 발송일 키라 휴장일에 같은 봉으로 재발송됐음).
 
     v2.15: schedule.every().day는 주말도 그대로 실행돼서, 주말 16:10에
     돌면 금요일 종가 그대로인 데이터를 "오늘자"로 다시 평가 → 이미
@@ -1175,8 +1212,6 @@ def check_distribution():
         ticker = p.get("ticker")
         if not pid or not ticker:
             continue
-        if _dist_fired.get(pid) == today:      # 오늘 이미 경고함
-            continue
         code = _kr_code(ticker)
         q = f"{code}.KQ" if code else ticker
         try:
@@ -1189,7 +1224,17 @@ def check_distribution():
             continue
         if not j.get("ok") or j.get("level") != "danger":
             continue
-        _dist_fired[pid] = today
+        # v2.30: 중복 방지 키 = 평가한 봉 날짜(pullback bar_date). 발송일 키는
+        # 휴장일(2026-09-25 추석)에 같은 09-23 봉을 재평가해 날짜만 바뀐
+        # 같은 경고를 또 보냈다. bar_date가 없으면(pullback 구버전) 발송일로
+        # 폴백 — pullback이 bar_date를 주도록 배포된 뒤에도 이 로그가 찍히면 버그.
+        bar_key = j.get("bar_date")
+        if not bar_key:
+            print(f"[분산] ⚠️ bar_date 없음 — 발송일 키로 폴백 ({ticker})")
+            bar_key = today
+        if _dist_fired.get(pid) == bar_key:    # 이 봉으로 이미 경고함
+            continue
+        _dist_fired[pid] = bar_key
         _save_sent_log()   # v2.28
         name = p.get("name") or ticker
         sigs = j.get("signals", [])
@@ -1815,6 +1860,13 @@ def check_opening_surge():
         return
     _opening_surge_fired_date = today
     _save_sent_log()   # v2.28
+    # v2.30: 휴장일(2026-09-25 추석)엔 오늘 봉이 없어 직전 거래일 하루치
+    # 거래량이 "장 시작 10분치"로 계산돼 996~4235배 급증이 발송됐다.
+    # pullback v5.287이 오늘 봉 없는 종목을 제외하고 사유를 준다 — 사유가
+    # 오면 hits 유무와 무관하게 발송 안 함.
+    if j.get("reason") == "no_today_bar":
+        print(f"[장초반 급증] 오늘 봉 없음(휴장/캐시 낡음, 제외 {j.get('n_stale_excluded')}종목) — 발송 안 함")
+        return
     if not hits:
         print("[장초반 급증] 급증 종목 없음")
         return
