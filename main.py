@@ -2300,6 +2300,151 @@ def morning_summary():
                 msg += f"{emoji} <b>{ticker}</b>: ${crypto_data['price']:,.2f} ({crypto_data['change_pct']:+.2f}%)\n"
     send_telegram(msg)
 
+
+# ── v2.31 매크로 아침 요약 — 매일 08:45 KST(주말 포함) ──────────────────
+# 금리 심볼 채택 근거(2026-09-30 실조회): ^TYX/^TNX는 v8 chart가 정상 응답,
+# US30YT=X/US10YT=X는 404 "No data found". ^TYX는 과거 %×10 스케일이었으나
+# 지금은 % 그대로(5.594) — 혹시 ×10으로 돌아오면 _macro_fetch에서 보정.
+# 전일 대비 기준: range=1d의 meta.previousClose(= 직전 정산가, 야후 화면과
+# 일치). range=1y 일봉 closes[-2]는 선물의 "라이브 봉" 앞 봉이라 하루 밀린
+# 값(CL=F 실측 -3.7% vs 정산 기준 -0.2%)이 나와 쓰지 않는다.
+MACRO_TIME = os.environ.get("MACRO_TIME", "08:45")   # KST HH:MM
+MACRO_SYMBOLS_RAW = os.environ.get(
+    "MACRO_SYMBOLS",
+    "NQ=F|나스닥100 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
+)
+MACRO_RETRY_SEC = int(os.environ.get("MACRO_RETRY_SEC", "60"))
+MACRO_RATE_SYMBOLS = {"^IRX", "^FVX", "^TNX", "^TYX"}   # %p 변화로 표기
+
+
+def _macro_symbols(raw=None):
+    """'SYM|라벨;SYM|라벨' → [(SYM, 라벨)]. 라벨 생략 시 심볼 그대로."""
+    out = []
+    for part in (MACRO_SYMBOLS_RAW if raw is None else raw).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        sym, _, label = part.partition("|")
+        out.append((sym.strip(), label.strip() or sym.strip()))
+    return out
+
+
+def _macro_fetch(symbol):
+    """야후 v8 chart 1회 조회. 실패 시 None.
+    반환: {"price", "prev_close", "is_rate", "high52", "low52"}.
+    high52/low52 = 과거 1년 일봉 종가(오늘 라이브 봉 제외)의 최고/최저 —
+    못 구하면 None(52주 표기 생략)."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    base = "https://query1.finance.yahoo.com/v8/finance/chart/"
+    try:
+        r = requests.get(f"{base}{symbol}?interval=5m&range=1d", headers=headers, timeout=10)
+        meta = r.json()["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        prev = float(meta.get("previousClose") or meta["chartPreviousClose"])
+    except Exception as e:
+        print(f"[매크로] {symbol} 조회 실패: {e}")
+        return None
+    is_rate = symbol in MACRO_RATE_SYMBOLS
+    if is_rate and price > 20:   # 레거시 %×10 스케일 방어
+        print(f"[매크로] {symbol} 값 {price} → ×10 스케일로 보고 /10")
+        price, prev = price / 10, prev / 10
+    high52 = low52 = None
+    try:
+        r = requests.get(f"{base}{symbol}?interval=1d&range=1y", headers=headers, timeout=10)
+        closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+                  if c is not None]
+        if is_rate and closes and max(closes) > 20:
+            closes = [c / 10 for c in closes]
+        # 마지막 봉은 현재가가 반영된 라이브 봉 — 비교 대상에서 뺀다
+        if closes and abs(closes[-1] - price) <= abs(price) * 1e-4:
+            closes = closes[:-1]
+        if len(closes) >= 200:   # 1년치에 한참 못 미치면 판정 안 함
+            high52, low52 = max(closes), min(closes)
+    except Exception as e:
+        print(f"[매크로] {symbol} 52주 조회 실패(표기 생략): {e}")
+    return {"price": price, "prev_close": prev, "is_rate": is_rate,
+            "high52": high52, "low52": low52}
+
+
+def format_macro_line(label, q):
+    """한 줄: '라벨  값  변화[ · 52주 최고/최저]'. q=None이면 조회 실패."""
+    if q is None:
+        return f"{label}  조회 실패"
+    price, prev = q["price"], q["prev_close"]
+    if q["is_rate"]:
+        line = f"{label}  {price:.3f}%  {price - prev:+.3f}"
+    else:
+        pct = (price - prev) / prev * 100 if prev else 0.0
+        line = f"{label}  {price:,.2f}  {pct:+.2f}%"
+    if q.get("high52") is not None and price >= q["high52"]:
+        line += " · 52주 최고"
+    elif q.get("low52") is not None and price <= q["low52"]:
+        line += " · 52주 최저"
+    return line
+
+
+def format_macro_message(rows, now_kst, holiday=False):
+    """rows = [(라벨, q 또는 None)]. 전부 None이면 실패 메시지."""
+    if all(q is None for _, q in rows):
+        return f"📊 매크로 조회 실패 · {now_kst.strftime('%m-%d %H:%M')} KST"
+    head = f"📊 매크로 · {now_kst.strftime('%m-%d %H:%M')} KST"
+    if holiday:
+        head += " · 휴장 — 전일 값"
+    return "\n".join([head] + [format_macro_line(label, q) for label, q in rows])
+
+
+def macro_is_holiday(rows, last_prices):
+    """성공한 심볼 값이 전부 직전 발송 값과 같으면 휴장(주말 등)."""
+    pairs = [(q["price"], last_prices.get(label)) for label, q in rows if q is not None]
+    pairs = [(p, lp) for p, lp in pairs if lp is not None]
+    return bool(pairs) and all(abs(p - lp) < 1e-9 for p, lp in pairs)
+
+
+def _macro_state_path():
+    return os.path.join(os.environ.get("DATA_DIR", "/tmp"), "macro_last.json")
+
+
+def _macro_load_last():
+    try:
+        with open(_macro_state_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _macro_save_last(rows):
+    last = {label: q["price"] for label, q in rows if q is not None}
+    try:
+        with open(_macro_state_path(), "w", encoding="utf-8") as f:
+            json.dump(last, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[매크로] 상태 저장 실패: {e}")
+
+
+def macro_report(retry=True):
+    """매크로 요약 1건 발송. 전체 실패면 MACRO_RETRY_SEC 뒤 1회 재시도
+    (메인 루프를 막지 않게 schedule 1회성 잡), 재시도도 전체 실패면 실패 1건."""
+    rows = [(label, _macro_fetch(sym)) for sym, label in _macro_symbols()]
+    now = datetime.now(KST)
+    if all(q is None for _, q in rows) and retry:
+        print(f"[매크로] 전체 조회 실패 — {MACRO_RETRY_SEC}초 뒤 1회 재시도")
+        def _retry_once():
+            macro_report(retry=False)
+            return schedule.CancelJob
+        schedule.every(MACRO_RETRY_SEC).seconds.do(_retry_once)
+        return
+    holiday = macro_is_holiday(rows, _macro_load_last())
+    send_telegram(format_macro_message(rows, now, holiday=holiday))
+    if any(q is not None for _, q in rows):
+        _macro_save_last(rows)
+    print(f"[매크로] 발송 (성공 {sum(q is not None for _, q in rows)}/{len(rows)}, 휴장={holiday})")
+
+
+def register_macro_schedule(sched):
+    """08:45 KST 매일(주말 포함). 서버 TZ와 무관하게 Asia/Seoul 기준."""
+    return sched.every().day.at(MACRO_TIME, "Asia/Seoul").do(macro_report)
+
+
 # 시작 알림
 # 대기종목(피벗 감시) 개수 조회 (실패해도 무시)
 _pending_cnt = 0
@@ -2348,6 +2493,7 @@ schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리
 schedule.every().day.at("14:48", "Asia/Seoul").do(check_jongga)  # v2.18 종가베팅 후보 발송
 schedule.every().day.at("09:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 토스 동기화 IP 실패 감시
 schedule.every().day.at("21:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 (하루 2회)
+register_macro_schedule(schedule)  # v2.31 매크로 아침 요약 (MACRO_TIME KST, 주말 포함)
 
 check_alerts()
 
