@@ -2389,23 +2389,23 @@ def _pad_right(text, width):
     return " " * max(0, width - _disp_width(text)) + text
 
 
-# v2.33 줄 앞 방향 이모지(텔레그램은 글자색 미지원)
-MACRO_DIR_UP = "🔺"
-MACRO_DIR_DOWN = "🔽"
-MACRO_DIR_FLAT = "▫️"   # 보합·조회 실패
+# 줄 앞 방향 기호(텔레그램은 글자색 미지원). v2.33 🔺🔽▫️ → v2.34 🔴🔵⚪
+MACRO_DIR_UP = "🔴"
+MACRO_DIR_DOWN = "🔵"
+MACRO_DIR_FLAT = "⚪"   # 보합·조회 실패
 
 
 def format_macro_line(label, q):
     """정렬된 한 줄(이스케이프 전 평문). 맨 앞에 방향 이모지 정확히 1개
-    (🔺상승/🔽하락/▫️보합·조회실패 — 모든 줄 동일 폭이라 열 정렬 유지).
-    q=None이면 값 열에 '조회 실패'. 금리 값은 % 없이(v2.33), 등락은 %p."""
+    (🔴상승/🔵하락/⚪보합·조회실패 — 모든 줄 동일 폭이라 열 정렬 유지).
+    q=None이면 값 열에 '조회 실패'. 금리 값은 5.594%(v2.34 복원), 등락은 %p라 % 없음."""
     name = _pad_left(label, MACRO_COL_NAME)
     if q is None:
         return MACRO_DIR_FLAT + name + _pad_right("조회 실패", MACRO_COL_VALUE)
     price, prev = q["price"], q["prev_close"]
     if q["is_rate"]:
         delta = round(price - prev, 3) or 0.0   # -0.000 → +0.000(보합)
-        value, change = f"{price:.3f}", f"{delta:+.3f}"
+        value, change = f"{price:.3f}%", f"{delta:+.3f}"
     else:
         delta = round((price - prev) / prev * 100 if prev else 0.0, 2) or 0.0
         value, change = f"{price:,.2f}", f"{delta:+.2f}%"

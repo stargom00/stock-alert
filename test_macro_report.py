@@ -52,14 +52,14 @@ NORMAL = [
 ]
 
 EXPECTED_BODY = [
-    "🔺나스닥 선물 30,708.50   +0.31%",
-    "🔺미국 30년       5.594   +0.033  ▲52주",
-    "🔺미국 10년       5.255   +0.015  ▲52주",
-    "🔺금           4,215.20   +0.85%",
-    "🔽WTI             89.33   -0.06%",
-    "🔽브렌트          96.12   -0.04%",
+    "🔴나스닥 선물 30,708.50   +0.31%",
+    "🔴미국 30년      5.594%   +0.033  ▲52주",
+    "🔴미국 10년      5.255%   +0.015  ▲52주",
+    "🔴금           4,215.20   +0.85%",
+    "🔵WTI             89.33   -0.06%",
+    "🔵브렌트          96.12   -0.04%",
 ]
-DIRS = ("🔺", "🔽", "▫️")
+DIRS = ("🔴", "🔵", "⚪")
 
 
 def _split_dir(line):
@@ -104,14 +104,14 @@ def test_columns_line_up(m):
 
 def test_negative_and_large_values(m):
     f, w = m["format_macro_line"], m["_disp_width"]
-    assert f("WTI", q(54.0, 60.0)) == "🔽WTI             54.00  -10.00%"   # 등락 7칸 꽉 채움
+    assert f("WTI", q(54.0, 60.0)) == "🔵WTI             54.00  -10.00%"   # 등락 7칸 꽉 채움
     # 값이 9칸 초과(123,456.78 = 10칸) → 그 줄만 밀리고 잘리지 않음
     big = f("나스닥 선물", q(123456.78, 120000.0))
     assert "123,456.78" in big and "+2.88%" in big
     assert w(_split_dir(big)[1]) == 12 + 10 + 2 + 7
     # 이름이 12칸 초과 → 잘리지 않고 밀림
     long = f("아주긴라벨이름입니다", q(1.0, 1.0))
-    assert long.startswith("▫️아주긴라벨이름입니다")
+    assert long.startswith("⚪아주긴라벨이름입니다")
 
 
 def test_52w_marks(m):
@@ -128,8 +128,8 @@ def test_partial_failure_keeps_alignment(m):
     rows[1] = ("미국 30년", None)
     rows[4] = ("WTI", None)
     _, body = _body(m["format_macro_message"](rows, NOW))
-    assert body[1] == "▫️미국 30년   조회 실패"
-    assert body[4] == "▫️WTI         조회 실패"
+    assert body[1] == "⚪미국 30년   조회 실패"
+    assert body[4] == "⚪WTI         조회 실패"
     w = m["_disp_width"]
     # 실패 줄의 '조회 실패' 오른쪽 끝 = 값 열 오른쪽 끝
     assert w(_split_dir(body[1])[1]) == w(_split_dir(body[4])[1]) == 12 + 9
@@ -138,24 +138,32 @@ def test_partial_failure_keeps_alignment(m):
 
 def test_direction_emoji(m):
     f = m["format_macro_line"]
-    assert f("금", q(101.0, 100.0)).startswith("🔺")
-    assert f("금", q(99.0, 100.0)).startswith("🔽")
-    assert f("금", q(100.0, 100.0)) .startswith("▫️")
-    assert f("금", q(100.001, 100.0)).startswith("▫️")                   # 표시상 +0.00% → 보합
+    assert f("금", q(101.0, 100.0)).startswith("🔴")
+    assert f("금", q(99.0, 100.0)).startswith("🔵")
+    assert f("금", q(100.0, 100.0)) .startswith("⚪")
+    assert f("금", q(100.001, 100.0)).startswith("⚪")                   # 표시상 +0.00% → 보합
     assert f("금", q(99.999, 100.0)).endswith("+0.00%")                  # -0.00% 안 나옴
-    assert f("미국 10년", q(5.2501, 5.2502, is_rate=True)).startswith("▫️")
+    assert f("미국 10년", q(5.2501, 5.2502, is_rate=True)).startswith("⚪")
     assert f("미국 10년", q(5.2501, 5.2502, is_rate=True)).endswith("+0.000")
-    assert f("미국 10년", q(5.24, 5.26, is_rate=True)).startswith("🔽")
-    assert f("금", None).startswith("▫️")
+    assert f("미국 10년", q(5.24, 5.26, is_rate=True)).startswith("🔵")
+    assert f("금", None).startswith("⚪")
     for line in (f("금", q(101.0, 100.0)), f("금", None), f("금", q(100.0, 100.0))):
         assert sum(line.count(d) for d in DIRS) == 1
 
 
-def test_rate_value_has_no_percent(m):
-    f = m["format_macro_line"]
+def test_rate_value_percent_change_pp(m):
+    """금리 값은 5.594%(값 열 오른쪽 정렬), 등락은 %p라 % 없음."""
+    f, w = m["format_macro_line"], m["_disp_width"]
     rate = f("미국 30년", q(5.594, 5.561, is_rate=True))
-    assert rate == "🔺미국 30년       5.594   +0.033"
-    assert "%" not in rate
+    assert rate == "🔴미국 30년      5.594%   +0.033"
+    assert rate.count("%") == 1 and rate.endswith("+0.033")
+    other = f("금", q(4215.20, 4179.70))
+    # 값 열 오른쪽 끝(이름 12 + 값 9 = 21칸)이 금리·일반 줄에서 같다.
+    # 뒤 9자 = 간격 2 + 등락 7(ASCII)
+    for line in (rate, other):
+        rest = _split_dir(line)[1]
+        assert w(rest[:-9]) == 12 + 9, line
+    assert _split_dir(rate)[1][:-9].endswith("5.594%")
     assert f("금", q(4215.20, 4179.70)).endswith("   +0.85%")          # 일반 등락 % 유지
 
 
