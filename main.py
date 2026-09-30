@@ -3,6 +3,8 @@ from names import resolve_ticker
 import time
 import re
 import json
+import html
+import unicodedata
 import secrets
 import requests
 import schedule
@@ -2311,7 +2313,7 @@ def morning_summary():
 MACRO_TIME = os.environ.get("MACRO_TIME", "08:45")   # KST HH:MM
 MACRO_SYMBOLS_RAW = os.environ.get(
     "MACRO_SYMBOLS",
-    "NQ=F|나스닥100 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
+    "NQ=F|나스닥 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
 )
 MACRO_RETRY_SEC = int(os.environ.get("MACRO_RETRY_SEC", "60"))
 MACRO_RATE_SYMBOLS = {"^IRX", "^FVX", "^TNX", "^TYX"}   # %p 변화로 표기
@@ -2366,31 +2368,59 @@ def _macro_fetch(symbol):
             "high52": high52, "low52": low52}
 
 
+# v2.32: <pre> 고정폭 열 정렬. 열 폭(표시 칸 수, 한글=2칸)은 여기 한 곳에서만.
+MACRO_COL_NAME = 12    # 이름 — 왼쪽 정렬
+MACRO_COL_VALUE = 9    # 값 — 오른쪽 정렬
+MACRO_COL_CHANGE = 7   # 등락 — 오른쪽 정렬
+MACRO_COL_GAP = "  "   # 값·등락·52주 사이 구분
+
+
+def _disp_width(text):
+    """고정폭 표시 칸 수 — 동아시아 전각(W/F, 한글 포함)은 2칸."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _pad_left(text, width):
+    """왼쪽 정렬. 폭을 넘으면 자르지 않고 그대로(그 줄만 밀림)."""
+    return text + " " * max(0, width - _disp_width(text))
+
+
+def _pad_right(text, width):
+    return " " * max(0, width - _disp_width(text)) + text
+
+
 def format_macro_line(label, q):
-    """한 줄: '라벨  값  변화[ · 52주 최고/최저]'. q=None이면 조회 실패."""
+    """정렬된 한 줄(이스케이프 전 평문). q=None이면 값 열에 '조회 실패'."""
+    name = _pad_left(label, MACRO_COL_NAME)
     if q is None:
-        return f"{label}  조회 실패"
+        return name + _pad_right("조회 실패", MACRO_COL_VALUE)
     price, prev = q["price"], q["prev_close"]
     if q["is_rate"]:
-        line = f"{label}  {price:.3f}%  {price - prev:+.3f}"
+        value, change = f"{price:.3f}%", f"{price - prev:+.3f}"
     else:
         pct = (price - prev) / prev * 100 if prev else 0.0
-        line = f"{label}  {price:,.2f}  {pct:+.2f}%"
+        value, change = f"{price:,.2f}", f"{pct:+.2f}%"
+    line = (name + _pad_right(value, MACRO_COL_VALUE)
+            + MACRO_COL_GAP + _pad_right(change, MACRO_COL_CHANGE))
     if q.get("high52") is not None and price >= q["high52"]:
-        line += " · 52주 최고"
+        line += MACRO_COL_GAP + "▲52주"
     elif q.get("low52") is not None and price <= q["low52"]:
-        line += " · 52주 최저"
+        line += MACRO_COL_GAP + "▼52주"
     return line
 
 
 def format_macro_message(rows, now_kst, holiday=False):
-    """rows = [(라벨, q 또는 None)]. 전부 None이면 실패 메시지."""
+    """rows = [(라벨, q 또는 None)]. 제목은 일반 텍스트, 본문은 <pre> 블록.
+    send_telegram이 parse_mode=HTML이므로 모든 텍스트는 html.escape.
+    전부 None이면 실패 메시지 1줄."""
+    stamp = now_kst.strftime("%m-%d %H:%M")
     if all(q is None for _, q in rows):
-        return f"📊 매크로 조회 실패 · {now_kst.strftime('%m-%d %H:%M')} KST"
-    head = f"📊 매크로 · {now_kst.strftime('%m-%d %H:%M')} KST"
+        return html.escape(f"📊 매크로 조회 실패 · {stamp} KST")
+    head = f"📊 매크로 · {stamp} KST"
     if holiday:
         head += " · 휴장 — 전일 값"
-    return "\n".join([head] + [format_macro_line(label, q) for label, q in rows])
+    body = "\n".join(format_macro_line(label, q) for label, q in rows)
+    return f"{html.escape(head)}\n<pre>{html.escape(body)}</pre>"
 
 
 def macro_is_holiday(rows, last_prices):

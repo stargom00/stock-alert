@@ -1,9 +1,11 @@
-"""v2.31 — 매크로 아침 요약 포맷 + 스케줄 판정 테스트.
+"""v2.31/v2.32 — 매크로 아침 요약 포맷(v2.32: <pre> 열 정렬) + 스케줄 판정 테스트.
 
 main.py는 import하면 while True로 빠지므로(test_holiday_alerts.py와 같은
 이유) 대상 함수만 AST로 뽑아 스텁 네임스페이스에서 돌린다."""
 import ast
+import html
 import os
+import unicodedata
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -16,17 +18,23 @@ NOW = datetime(2026, 9, 30, 8, 45, tzinfo=KST)
 
 
 def _load(names, ns):
+    """함수 + MACRO_COL_* 상수만 뽑아 실행."""
     with open(MAIN_PY, encoding="utf-8") as f:
         tree = ast.parse(f.read())
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(nodes) == len(names), f"main.py에서 {sorted(names)} 중 일부를 못 찾음"
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), MAIN_PY, "exec"), ns)
+    consts = [n for n in tree.body if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", "").startswith("MACRO_COL_") for t in n.targets)]
+    ns.setdefault("html", html)
+    ns.setdefault("unicodedata", unicodedata)
+    exec(compile(ast.Module(body=consts + nodes, type_ignores=[]), MAIN_PY, "exec"), ns)
     return ns
 
 
 @pytest.fixture
 def m():
-    return _load({"format_macro_line", "format_macro_message", "macro_is_holiday"}, {})
+    return _load({"_disp_width", "_pad_left", "_pad_right", "format_macro_line",
+                  "format_macro_message", "macro_is_holiday"}, {})
 
 
 def q(price, prev, is_rate=False, high52=None, low52=None):
@@ -35,37 +43,86 @@ def q(price, prev, is_rate=False, high52=None, low52=None):
 
 
 NORMAL = [
-    ("나스닥100 선물", q(30699.75, 30613.25)),
-    ("미국 30년", q(5.573, 5.594, is_rate=True)),
-    ("미국 10년", q(5.244, 5.260, is_rate=True)),
-    ("금", q(4216.30, 4179.70)),
-    ("WTI", q(89.23, 89.38)),
-    ("브렌트", q(95.71, 97.83)),
+    ("나스닥 선물", q(30708.50, 30613.25)),
+    ("미국 30년", q(5.594, 5.561, is_rate=True, high52=5.561)),
+    ("미국 10년", q(5.255, 5.240, is_rate=True, high52=5.240)),
+    ("금", q(4215.20, 4179.70)),
+    ("WTI", q(89.33, 89.38)),
+    ("브렌트", q(96.12, 96.16)),
+]
+
+EXPECTED_BODY = [
+    "나스닥 선물 30,708.50   +0.31%",
+    "미국 30년      5.594%   +0.033  ▲52주",
+    "미국 10년      5.255%   +0.015  ▲52주",
+    "금           4,215.20   +0.85%",
+    "WTI             89.33   -0.06%",
+    "브렌트          96.12   -0.04%",
 ]
 
 
-def test_normal(m):
-    assert m["format_macro_message"](NORMAL, NOW).split("\n") == [
-        "📊 매크로 · 09-30 08:45 KST",
-        "나스닥100 선물  30,699.75  +0.28%",
-        "미국 30년  5.573%  -0.021",
-        "미국 10년  5.244%  -0.016",
-        "금  4,216.30  +0.88%",
-        "WTI  89.23  -0.17%",
-        "브렌트  95.71  -2.17%",
-    ]
+def _body(msg):
+    head, rest = msg.split("\n", 1)
+    assert rest.startswith("<pre>") and rest.endswith("</pre>")
+    return head, html.unescape(rest[len("<pre>"):-len("</pre>")]).split("\n")
 
 
-def test_partial_failure(m):
+def test_disp_width(m):
+    w = m["_disp_width"]
+    assert w("WTI") == 3
+    assert w("금") == 2
+    assert w("나스닥 선물") == 11          # 한글 5자×2 + 공백 1
+    assert w("미국 30년") == 9             # 한글 3자×2 + 공백 + 숫자 2
+    assert w("▲52주") == 5                 # ▲는 1칸(ambiguous), 주는 2칸
+
+
+def test_normal_layout(m):
+    head, body = _body(m["format_macro_message"](NORMAL, NOW))
+    assert head == "📊 매크로 · 09-30 08:45 KST"
+    assert body == EXPECTED_BODY
+
+
+def test_columns_line_up(m):
+    """값·등락 열의 오른쪽 끝 표시 위치가 모든 줄에서 같다."""
+    _, body = _body(m["format_macro_message"](NORMAL, NOW))
+    w = m["_disp_width"]
+    for line in body:
+        core = line.split("  ▲")[0]
+        assert w(core) == 12 + 9 + 2 + 7, line
+
+
+def test_negative_and_large_values(m):
+    f, w = m["format_macro_line"], m["_disp_width"]
+    assert f("WTI", q(54.0, 60.0)) == "WTI             54.00  -10.00%"   # 등락 7칸 꽉 채움
+    # 값이 9칸 초과(123,456.78 = 10칸) → 그 줄만 밀리고 잘리지 않음
+    big = f("나스닥 선물", q(123456.78, 120000.0))
+    assert "123,456.78" in big and "+2.88%" in big
+    assert w(big) == 12 + 10 + 2 + 7
+    # 이름이 12칸 초과 → 잘리지 않고 밀림
+    long = f("아주긴라벨이름입니다", q(1.0, 1.0))
+    assert long.startswith("아주긴라벨이름입니다")
+
+
+def test_52w_marks(m):
+    f = m["format_macro_line"]
+    assert f("금", q(4300.0, 4200.0, high52=4300.0, low52=3800)).endswith("  +2.38%  ▲52주")
+    assert f("WTI", q(54.0, 55.0, high52=119, low52=54.5)).endswith("  ▼52주")
+    no = f("금", q(4299.0, 4200.0, high52=4300.0, low52=3800))
+    assert "52주" not in no and no.endswith("+2.36%")
+    assert "52주" not in f("금", q(9999.0, 4200.0))            # 52주 데이터 없음 → 생략
+
+
+def test_partial_failure_keeps_alignment(m):
     rows = list(NORMAL)
     rows[1] = ("미국 30년", None)
     rows[4] = ("WTI", None)
-    lines = m["format_macro_message"](rows, NOW).split("\n")
-    assert lines[0] == "📊 매크로 · 09-30 08:45 KST"
-    assert lines[2] == "미국 30년  조회 실패"
-    assert lines[5] == "WTI  조회 실패"
-    assert lines[1] == "나스닥100 선물  30,699.75  +0.28%"
-    assert len(lines) == 7
+    _, body = _body(m["format_macro_message"](rows, NOW))
+    assert body[1] == "미국 30년   조회 실패"
+    assert body[4] == "WTI         조회 실패"
+    w = m["_disp_width"]
+    # 실패 줄의 '조회 실패' 오른쪽 끝 = 값 열 오른쪽 끝
+    assert w(body[1]) == w(body[4]) == 12 + 9
+    assert body[0] == EXPECTED_BODY[0]
 
 
 def test_total_failure(m):
@@ -73,27 +130,25 @@ def test_total_failure(m):
     assert m["format_macro_message"](rows, NOW) == "📊 매크로 조회 실패 · 09-30 08:45 KST"
 
 
-def test_52w_high_low(m):
-    f = m["format_macro_line"]
-    assert f("금", q(4300.0, 4200.0, high52=4299.9, low52=3800)).endswith("+2.38% · 52주 최고")
-    assert f("금", q(4300.0, 4200.0, high52=4300.0, low52=3800)).endswith(" · 52주 최고")  # 타이도 경신
-    assert "52주" not in f("금", q(4299.0, 4200.0, high52=4300.0, low52=3800))
-    assert f("WTI", q(54.0, 55.0, high52=119, low52=54.5)).endswith(" · 52주 최저")
-    assert f("미국 10년", q(5.30, 5.25, is_rate=True, high52=5.29, low52=3.9)) == \
-        "미국 10년  5.300%  +0.050 · 52주 최고"
-    # 52주 데이터를 못 구하면(None) 표기 생략
-    assert "52주" not in f("금", q(9999.0, 4200.0))
+def test_html_escape(m):
+    rows = [("A<B>&C", q(1.0, 1.0)), ("</pre><b>", None)]
+    msg = m["format_macro_message"](rows, NOW)
+    assert msg.count("<pre>") == 1 and msg.count("</pre>") == 1   # 태그 탈출 불가
+    assert "A&lt;B&gt;&amp;C" in msg
+    assert "&lt;/pre&gt;&lt;b&gt;" in msg
+    assert "<b>" not in msg
 
 
 def test_holiday(m):
     last = {label: qq["price"] for label, qq in NORMAL}
     assert m["macro_is_holiday"](NORMAL, last) is True
-    assert "휴장 — 전일 값" in m["format_macro_message"](NORMAL, NOW, holiday=True).split("\n")[0]
+    head, _ = _body(m["format_macro_message"](NORMAL, NOW, holiday=True))
+    assert head == "📊 매크로 · 09-30 08:45 KST · 휴장 — 전일 값"
     changed = list(NORMAL)
-    changed[0] = ("나스닥100 선물", q(30700.00, 30613.25))
+    changed[0] = ("나스닥 선물", q(30700.00, 30613.25))
     assert m["macro_is_holiday"](changed, last) is False
-    assert m["macro_is_holiday"](NORMAL, {}) is False           # 직전 기록 없음
-    rows = [(l, None if l == "금" else qq) for l, qq in NORMAL]  # 실패 줄은 비교 제외
+    assert m["macro_is_holiday"](NORMAL, {}) is False
+    rows = [(l, None if l == "금" else qq) for l, qq in NORMAL]
     assert m["macro_is_holiday"](rows, last) is True
 
 
