@@ -18,13 +18,13 @@ NOW = datetime(2026, 9, 30, 8, 45, tzinfo=KST)
 
 
 def _load(names, ns):
-    """함수 + MACRO_COL_* 상수만 뽑아 실행."""
+    """함수 + MACRO_COL_*/MACRO_DIR_* 상수만 뽑아 실행."""
     with open(MAIN_PY, encoding="utf-8") as f:
         tree = ast.parse(f.read())
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(nodes) == len(names), f"main.py에서 {sorted(names)} 중 일부를 못 찾음"
     consts = [n for n in tree.body if isinstance(n, ast.Assign)
-              and any(getattr(t, "id", "").startswith("MACRO_COL_") for t in n.targets)]
+              and any(getattr(t, "id", "").startswith(("MACRO_COL_", "MACRO_DIR_")) for t in n.targets)]
     ns.setdefault("html", html)
     ns.setdefault("unicodedata", unicodedata)
     exec(compile(ast.Module(body=consts + nodes, type_ignores=[]), MAIN_PY, "exec"), ns)
@@ -52,13 +52,22 @@ NORMAL = [
 ]
 
 EXPECTED_BODY = [
-    "나스닥 선물 30,708.50   +0.31%",
-    "미국 30년      5.594%   +0.033  ▲52주",
-    "미국 10년      5.255%   +0.015  ▲52주",
-    "금           4,215.20   +0.85%",
-    "WTI             89.33   -0.06%",
-    "브렌트          96.12   -0.04%",
+    "🔺나스닥 선물 30,708.50   +0.31%",
+    "🔺미국 30년       5.594   +0.033  ▲52주",
+    "🔺미국 10년       5.255   +0.015  ▲52주",
+    "🔺금           4,215.20   +0.85%",
+    "🔽WTI             89.33   -0.06%",
+    "🔽브렌트          96.12   -0.04%",
 ]
+DIRS = ("🔺", "🔽", "▫️")
+
+
+def _split_dir(line):
+    """맨 앞 방향 이모지 1개를 떼어 (이모지, 나머지)."""
+    for d in DIRS:
+        if line.startswith(d):
+            return d, line[len(d):]
+    raise AssertionError(f"방향 이모지 없음: {line!r}")
 
 
 def _body(msg):
@@ -87,20 +96,22 @@ def test_columns_line_up(m):
     _, body = _body(m["format_macro_message"](NORMAL, NOW))
     w = m["_disp_width"]
     for line in body:
-        core = line.split("  ▲")[0]
+        _, rest = _split_dir(line)
+        assert not any(d in rest for d in DIRS), line          # 이모지 정확히 1개
+        core = rest.split("  ▲")[0]
         assert w(core) == 12 + 9 + 2 + 7, line
 
 
 def test_negative_and_large_values(m):
     f, w = m["format_macro_line"], m["_disp_width"]
-    assert f("WTI", q(54.0, 60.0)) == "WTI             54.00  -10.00%"   # 등락 7칸 꽉 채움
+    assert f("WTI", q(54.0, 60.0)) == "🔽WTI             54.00  -10.00%"   # 등락 7칸 꽉 채움
     # 값이 9칸 초과(123,456.78 = 10칸) → 그 줄만 밀리고 잘리지 않음
     big = f("나스닥 선물", q(123456.78, 120000.0))
     assert "123,456.78" in big and "+2.88%" in big
-    assert w(big) == 12 + 10 + 2 + 7
+    assert w(_split_dir(big)[1]) == 12 + 10 + 2 + 7
     # 이름이 12칸 초과 → 잘리지 않고 밀림
     long = f("아주긴라벨이름입니다", q(1.0, 1.0))
-    assert long.startswith("아주긴라벨이름입니다")
+    assert long.startswith("▫️아주긴라벨이름입니다")
 
 
 def test_52w_marks(m):
@@ -117,12 +128,35 @@ def test_partial_failure_keeps_alignment(m):
     rows[1] = ("미국 30년", None)
     rows[4] = ("WTI", None)
     _, body = _body(m["format_macro_message"](rows, NOW))
-    assert body[1] == "미국 30년   조회 실패"
-    assert body[4] == "WTI         조회 실패"
+    assert body[1] == "▫️미국 30년   조회 실패"
+    assert body[4] == "▫️WTI         조회 실패"
     w = m["_disp_width"]
     # 실패 줄의 '조회 실패' 오른쪽 끝 = 값 열 오른쪽 끝
-    assert w(body[1]) == w(body[4]) == 12 + 9
+    assert w(_split_dir(body[1])[1]) == w(_split_dir(body[4])[1]) == 12 + 9
     assert body[0] == EXPECTED_BODY[0]
+
+
+def test_direction_emoji(m):
+    f = m["format_macro_line"]
+    assert f("금", q(101.0, 100.0)).startswith("🔺")
+    assert f("금", q(99.0, 100.0)).startswith("🔽")
+    assert f("금", q(100.0, 100.0)) .startswith("▫️")
+    assert f("금", q(100.001, 100.0)).startswith("▫️")                   # 표시상 +0.00% → 보합
+    assert f("금", q(99.999, 100.0)).endswith("+0.00%")                  # -0.00% 안 나옴
+    assert f("미국 10년", q(5.2501, 5.2502, is_rate=True)).startswith("▫️")
+    assert f("미국 10년", q(5.2501, 5.2502, is_rate=True)).endswith("+0.000")
+    assert f("미국 10년", q(5.24, 5.26, is_rate=True)).startswith("🔽")
+    assert f("금", None).startswith("▫️")
+    for line in (f("금", q(101.0, 100.0)), f("금", None), f("금", q(100.0, 100.0))):
+        assert sum(line.count(d) for d in DIRS) == 1
+
+
+def test_rate_value_has_no_percent(m):
+    f = m["format_macro_line"]
+    rate = f("미국 30년", q(5.594, 5.561, is_rate=True))
+    assert rate == "🔺미국 30년       5.594   +0.033"
+    assert "%" not in rate
+    assert f("금", q(4215.20, 4179.70)).endswith("   +0.85%")          # 일반 등락 % 유지
 
 
 def test_total_failure(m):
