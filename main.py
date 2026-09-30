@@ -2313,7 +2313,7 @@ def morning_summary():
 MACRO_TIME = os.environ.get("MACRO_TIME", "08:45")   # KST HH:MM
 MACRO_SYMBOLS_RAW = os.environ.get(
     "MACRO_SYMBOLS",
-    "NQ=F|나스닥 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
+    "NQ=F|나스닥100;ES=F|S&P 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
 )
 MACRO_RETRY_SEC = int(os.environ.get("MACRO_RETRY_SEC", "60"))
 MACRO_RATE_SYMBOLS = {"^IRX", "^FVX", "^TNX", "^TYX"}   # %p 변화로 표기

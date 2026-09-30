@@ -43,7 +43,8 @@ def q(price, prev, is_rate=False, high52=None, low52=None):
 
 
 NORMAL = [
-    ("나스닥 선물", q(30708.50, 30613.25)),
+    ("나스닥100", q(30708.50, 30613.25)),
+    ("S&P 선물", q(7739.50, 7715.50)),
     ("미국 30년", q(5.594, 5.561, is_rate=True, high52=5.561)),
     ("미국 10년", q(5.255, 5.240, is_rate=True, high52=5.240)),
     ("금", q(4215.20, 4179.70)),
@@ -52,7 +53,8 @@ NORMAL = [
 ]
 
 EXPECTED_BODY = [
-    "🔴나스닥 선물 30,708.50   +0.31%",
+    "🔴나스닥100   30,708.50   +0.31%",
+    "🔴S&P 선물     7,739.50   +0.31%",
     "🔴미국 30년      5.594%   +0.033  ▲52주",
     "🔴미국 10년      5.255%   +0.015  ▲52주",
     "🔴금           4,215.20   +0.85%",
@@ -81,6 +83,8 @@ def test_disp_width(m):
     assert w("WTI") == 3
     assert w("금") == 2
     assert w("나스닥 선물") == 11          # 한글 5자×2 + 공백 1
+    assert w("나스닥100") == 9             # 한글 3자×2 + 숫자 3
+    assert w("S&P 선물") == 8              # 영문·기호 3 + 공백 + 한글 2자
     assert w("미국 30년") == 9             # 한글 3자×2 + 공백 + 숫자 2
     assert w("▲52주") == 5                 # ▲는 1칸(ambiguous), 주는 2칸
 
@@ -125,15 +129,15 @@ def test_52w_marks(m):
 
 def test_partial_failure_keeps_alignment(m):
     rows = list(NORMAL)
-    rows[1] = ("미국 30년", None)
-    rows[4] = ("WTI", None)
+    rows[2] = ("미국 30년", None)
+    rows[5] = ("WTI", None)
     _, body = _body(m["format_macro_message"](rows, NOW))
-    assert body[1] == "⚪미국 30년   조회 실패"
-    assert body[4] == "⚪WTI         조회 실패"
+    assert body[2] == "⚪미국 30년   조회 실패"
+    assert body[5] == "⚪WTI         조회 실패"
     w = m["_disp_width"]
     # 실패 줄의 '조회 실패' 오른쪽 끝 = 값 열 오른쪽 끝
-    assert w(_split_dir(body[1])[1]) == w(_split_dir(body[4])[1]) == 12 + 9
-    assert body[0] == EXPECTED_BODY[0]
+    assert w(_split_dir(body[2])[1]) == w(_split_dir(body[5])[1]) == 12 + 9
+    assert body[:2] == EXPECTED_BODY[:2]
 
 
 def test_direction_emoji(m):
@@ -181,13 +185,21 @@ def test_html_escape(m):
     assert "<b>" not in msg
 
 
+def test_sp_label_escaped(m):
+    """기본 라벨 'S&P 선물'의 &는 본문에서 &amp;로, 정렬은 원문 폭 기준."""
+    msg = m["format_macro_message"](NORMAL, NOW)
+    assert "S&amp;P 선물" in msg and "S&P" not in msg
+    _, body = _body(msg)
+    assert body[1] == "🔴S&P 선물     7,739.50   +0.31%"
+
+
 def test_holiday(m):
     last = {label: qq["price"] for label, qq in NORMAL}
     assert m["macro_is_holiday"](NORMAL, last) is True
     head, _ = _body(m["format_macro_message"](NORMAL, NOW, holiday=True))
     assert head == "📊 매크로 · 09-30 08:45 KST · 휴장 — 전일 값"
     changed = list(NORMAL)
-    changed[0] = ("나스닥 선물", q(30700.00, 30613.25))
+    changed[0] = ("나스닥100", q(30700.00, 30613.25))
     assert m["macro_is_holiday"](changed, last) is False
     assert m["macro_is_holiday"](NORMAL, {}) is False
     rows = [(l, None if l == "금" else qq) for l, qq in NORMAL]
