@@ -47,6 +47,8 @@ NORMAL = [
     ("S&P 선물", q(7739.50, 7715.50)),
     ("미국 30년", q(5.594, 5.561, is_rate=True, high52=5.561)),
     ("미국 10년", q(5.255, 5.240, is_rate=True, high52=5.240)),
+    ("코스피", q(6918.25, 6838.04)),          # v2.36 ^KS11 (2026-10-01 실조회값)
+    ("코스닥", q(885.57, 849.80)),            # v2.36 ^KQ11
     ("금", q(4215.20, 4179.70)),
     ("WTI", q(89.33, 89.38)),
     ("브렌트", q(96.12, 96.16)),
@@ -57,6 +59,8 @@ EXPECTED_BODY = [
     "🔴S&P 선물     7,739.50   +0.31%",
     "🔴미국 30년      5.594%   +0.033  ▲52주",
     "🔴미국 10년      5.255%   +0.015  ▲52주",
+    "🔴코스피       6,918.25   +1.17%",
+    "🔴코스닥         885.57   +4.21%",
     "🔴금           4,215.20   +0.85%",
     "🔵WTI             89.33   -0.06%",
     "🔵브렌트          96.12   -0.04%",
@@ -86,6 +90,8 @@ def test_disp_width(m):
     assert w("나스닥100") == 9             # 한글 3자×2 + 숫자 3
     assert w("S&P 선물") == 8              # 영문·기호 3 + 공백 + 한글 2자
     assert w("미국 30년") == 9             # 한글 3자×2 + 공백 + 숫자 2
+    assert w("코스피") == 6                # v2.36 한글 3자×2 — MACRO_COL_NAME(12) 안
+    assert w("코스닥") == 6
     assert w("▲52주") == 5                 # ▲는 1칸(ambiguous), 주는 2칸
 
 
@@ -222,3 +228,56 @@ def test_schedule_is_0845_kst_regardless_of_server_tz(server_tz, monkeypatch):
     finally:
         monkeypatch.delenv("TZ")
         time.tzset()
+
+
+# ── v2.36: 매크로 심볼 목록·순서 ────────────────────────────────────
+
+def _macro_symbols_raw():
+    """main.py의 MACRO_SYMBOLS_RAW 기본값(환경변수 미설정 상태)만 뽑는다."""
+    import os as _os
+    tree = ast.parse(open(MAIN_PY, encoding="utf-8").read())
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "MACRO_SYMBOLS_RAW"
+                                             for t in n.targets):
+            ns = {"os": _os}
+            exec(compile(ast.Module(body=[n], type_ignores=[]), MAIN_PY, "exec"), ns)
+            return ns["MACRO_SYMBOLS_RAW"]
+    raise AssertionError("MACRO_SYMBOLS_RAW를 못 찾음")
+
+
+def _pairs():
+    return [tuple(p.split("|")) for p in _macro_symbols_raw().split(";") if p.strip()]
+
+
+def test_kr_indices_present():
+    """코스피·코스닥이 기본 목록에 있어야 한다(v2.36 — 전일 KR 마감 확인용)."""
+    syms = dict(_pairs())
+    assert syms.get("^KS11") == "코스피", "^KS11(코스피)이 빠졌다"
+    assert syms.get("^KQ11") == "코스닥", "^KQ11(코스닥)이 빠졌다"
+
+
+def test_macro_symbol_order():
+    """사용자 지정 배치 순서."""
+    assert [label for _, label in _pairs()] == [
+        "나스닥100", "S&P 선물", "미국 30년", "미국 10년",
+        "코스피", "코스닥", "금", "WTI", "브렌트",
+    ]
+
+
+def test_kr_indices_are_not_rate_symbols():
+    """금리가 아니므로 %p가 아니라 %로 찍혀야 한다 — MACRO_RATE_SYMBOLS에 없어야 한다."""
+    src = open(MAIN_PY, encoding="utf-8").read()
+    line = [l for l in src.splitlines() if l.startswith("MACRO_RATE_SYMBOLS")]
+    assert len(line) == 1
+    assert "KS11" not in line[0] and "KQ11" not in line[0]
+
+
+def test_kr_index_line_format(m):
+    """지수 형식: 값 소수 둘째 자리 + 등락 % + 색 규칙(상승 🔴 / 하락 🔵 / 보합 ⚪)."""
+    f = m["format_macro_line"]
+    assert f("코스피", q(6918.25, 6838.04)) .startswith("🔴")
+    assert "6,918.25" in f("코스피", q(6918.25, 6838.04))
+    assert "+1.17%" in f("코스피", q(6918.25, 6838.04))
+    assert f("코스닥", q(849.80, 885.57)).startswith("🔵")
+    assert "-4.04%" in f("코스닥", q(849.80, 885.57))
+    assert f("코스피", q(6918.25, 6918.25)).startswith("⚪")

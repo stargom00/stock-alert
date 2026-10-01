@@ -2311,9 +2311,17 @@ def morning_summary():
 # 일치). range=1y 일봉 closes[-2]는 선물의 "라이브 봉" 앞 봉이라 하루 밀린
 # 값(CL=F 실측 -3.7% vs 정산 기준 -0.2%)이 나와 쓰지 않는다.
 MACRO_TIME = os.environ.get("MACRO_TIME", "08:45")   # KST HH:MM
+# v2.36(사용자 지시): 코스피·코스닥 추가 — 아침 메시지로 **전일 KR 마감**을 확인하려는 것.
+# 심볼 채택 근거(2026-10-01 실조회): ^KS11 → KOSPI Composite Index 6,918.25,
+# ^KQ11 → Kosdaq Composite Index 885.57, 둘 다 v8 chart가 meta.previousClose를 주고
+# exchangeTimezoneName이 Asia/Seoul이다. 금리가 아니므로 MACRO_RATE_SYMBOLS에 넣지 않는다
+# (값=소수 둘째 자리, 등락=%, 색 규칙은 기존 지수·선물과 동일한 경로를 그대로 탄다).
+# 순서는 사용자 지정: 나스닥 선물 → S&P 선물 → 미국 30년 → 미국 10년 → 코스피 → 코스닥
+# → 금 → WTI → 브렌트.
 MACRO_SYMBOLS_RAW = os.environ.get(
     "MACRO_SYMBOLS",
-    "NQ=F|나스닥100;ES=F|S&P 선물;^TYX|미국 30년;^TNX|미국 10년;GC=F|금;CL=F|WTI;BZ=F|브렌트",
+    "NQ=F|나스닥100;ES=F|S&P 선물;^TYX|미국 30년;^TNX|미국 10년;"
+    "^KS11|코스피;^KQ11|코스닥;GC=F|금;CL=F|WTI;BZ=F|브렌트",
 )
 MACRO_RETRY_SEC = int(os.environ.get("MACRO_RETRY_SEC", "60"))
 MACRO_RATE_SYMBOLS = {"^IRX", "^FVX", "^TNX", "^TYX"}   # %p 변화로 표기
