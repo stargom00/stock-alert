@@ -72,6 +72,12 @@ CONFIG = {
     "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙
     "LEVEL_PAD_PCT": _env_float("COIN_LEVEL_PAD_PCT", "0.05"),  # 목표·손절 여유 %
     "LEVEL_LOOKBACK": _env_int("COIN_LEVEL_LOOKBACK", "200"),   # 스윙 탐색 봉 수
+    "MIN_LEVEL_DIST_PCT": _env_float("COIN_MIN_LEVEL_DIST_PCT", "0.15"),  # v2.40 진입가에서 이보다 가까운 목표·손절 스윙은 건너뜀
+    "EXTREME_PAD_PCT": _env_float("COIN_EXTREME_PAD_PCT", "0.1"),         # v2.40 스윙 없을 때 구간 극값 여유 %
+    # v2.40 알림 억제(저장·추적은 함): 목표1 거리 < 이 값 % 또는 손익비 < 이 값
+    "SUPPRESS_MIN_T1_PCT": _env_float("COIN_SUPPRESS_MIN_T1_PCT", "0.15"),
+    "SUPPRESS_MIN_RR": _env_float("COIN_SUPPRESS_MIN_RR", "0.5"),
+    "CROSS_DUP_MIN": _env_float("COIN_CROSS_DUP_MIN", "10"),  # v2.40 다른 주기 같은 방향 발송 후 이 분 이내면 중복
     # 상위 주기 맥락
     "CLOUD_TF": os.environ.get("COIN_CLOUD_TF", "30m"),
     "ICHI_TENKAN": 9,
@@ -224,31 +230,53 @@ def find_swings(bars, k=None):
     return lows, highs
 
 
-def compute_levels(bars, side, entry, k=None, pad_pct=None):
+def compute_levels(bars, side, entry, k=None, pad_pct=None, min_dist_pct=None, extreme_pad_pct=None):
     """목표1/2·손절·손익비.
     숏: 진입가 아래 스윙 저점을 가까운 순으로 목표1·목표2(저점 +여유 — 닿기
     직전에 익절), 진입가 위 가장 가까운 스윙 고점 +여유 = 손절(고점 바깥).
     롱은 대칭(목표 = 고점 −여유, 손절 = 저점 −여유).
-    여유를 적용한 목표가 진입가를 넘어가 버리는 스윙(진입가 바로 옆)은 건너뜀.
-    없는 값은 None."""
+    v2.40: 여유 적용 후 진입가 대비 min_dist_pct(0.15%) 미만인 스윙은 건너뛰고
+    다음 스윙. 쓸 스윙이 모자라면 구간 극값(숏 목표 = 최저가 +0.1%, 숏 손절 =
+    최고가 +0.1%, 롱 대칭)을 같은 조건(방향·최소 거리, 목표2는 목표1보다 멀리)
+    으로 한 번 더 시도. 그래도 없으면 None. src = 각 값의 출처 swing/extreme."""
     k = CONFIG["SWING_K"] if k is None else k
     pad = (CONFIG["LEVEL_PAD_PCT"] if pad_pct is None else pad_pct) / 100.0
+    min_d = (CONFIG["MIN_LEVEL_DIST_PCT"] if min_dist_pct is None else min_dist_pct) / 100.0
+    xpad = (CONFIG["EXTREME_PAD_PCT"] if extreme_pad_pct is None else extreme_pad_pct) / 100.0
     lows, highs = find_swings(bars, k)
     low_px = sorted({p for _, p in lows})
     high_px = sorted({p for _, p in highs})
+    sign = 1 if side == "long" else -1      # 목표 쪽 방향
+
+    def ok(level, toward_target):
+        d = (level - entry) / entry * (sign if toward_target else -sign)
+        return d >= min_d
+
     if side == "short":
-        targets = [p * (1 + pad) for p in reversed(low_px) if p * (1 + pad) < entry]
-        stops = [p * (1 + pad) for p in high_px if p > entry]
+        targets = [p * (1 + pad) for p in reversed(low_px)]
+        stops = [p * (1 + pad) for p in high_px]
+        x_target = min(b["l"] for b in bars) * (1 + xpad) if bars else None
+        x_stop = max(b["h"] for b in bars) * (1 + xpad) if bars else None
     else:
-        targets = [p * (1 - pad) for p in high_px if p * (1 - pad) > entry]
-        stops = [p * (1 - pad) for p in reversed(low_px) if p < entry]
-    t1 = targets[0] if targets else None
-    t2 = targets[1] if len(targets) > 1 else None
-    stop = stops[0] if stops else None
+        targets = [p * (1 - pad) for p in high_px]
+        stops = [p * (1 - pad) for p in reversed(low_px)]
+        x_target = max(b["h"] for b in bars) * (1 - xpad) if bars else None
+        x_stop = min(b["l"] for b in bars) * (1 - xpad) if bars else None
+    targets = [(p, "swing") for p in targets if ok(p, True)]
+    stops = [(p, "swing") for p in stops if ok(p, False)]
+    if len(targets) < 2 and x_target is not None and ok(x_target, True) and \
+            (not targets or (x_target - targets[-1][0]) * sign > 0):
+        targets.append((x_target, "extreme"))
+    if not stops and x_stop is not None and ok(x_stop, False):
+        stops.append((x_stop, "extreme"))
+    t1, s1 = targets[0] if targets else (None, None)
+    t2, s2 = targets[1] if len(targets) > 1 else (None, None)
+    stop, ss = stops[0] if stops else (None, None)
     rr = None
     if t1 is not None and stop is not None and stop != entry:
         rr = abs(entry - t1) / abs(stop - entry)
-    return {"target1": t1, "target2": t2, "stop": stop, "rr": rr}
+    return {"target1": t1, "target2": t2, "stop": stop, "rr": rr,
+            "src": {"target1": s1, "target2": s2, "stop": ss}}
 
 
 def ichimoku_cloud(bars, tenkan=None, kijun=None, senkou_b=None, displacement=None):
@@ -317,7 +345,7 @@ def _err_text(e):
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게)."""
-    out = {"target1": None, "target2": None, "stop": None, "rr": None,
+    out = {"target1": None, "target2": None, "stop": None, "rr": None, "src": {},
            "cloud": None, "htf_rsi": None, "errors": {}}   # {"levels"|"cloud"|"htf_rsi": 사유}
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)

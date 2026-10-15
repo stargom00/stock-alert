@@ -27,6 +27,7 @@ from signal_levels import CONFIG, TF_MS
 KST = timezone(timedelta(hours=9))
 NZ_TZ = pytz.timezone("Pacific/Auckland")
 MINUS = "−"
+MIN_MS = 60_000
 
 _lock = threading.RLock()
 _webhook_q = queue.Queue(maxsize=200)
@@ -127,6 +128,8 @@ def format_signal_message(sig):
                 lines.append(f"{label} 없음")
                 continue
             line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
+            if (sig.get("level_src") or {}).get(key) == "extreme":
+                line += " 구간 극값"
             if key == "target1" and rr_warn:
                 line += " ⚠️"
             lines.append(line)
@@ -167,6 +170,27 @@ def is_duplicate(signals, symbol, tf, side, bar_open_ms, n_bars=None):
                and abs(bar_open_ms - s["bar_open_ms"]) < span for s in signals)
 
 
+def suppress_reason(entry, target1, rr):
+    """v2.40 알림 억제 사유(없으면 None). 값이 없는 항목(None)은 판정하지 않음."""
+    reasons = []
+    if target1 is not None and abs(target1 - entry) / entry * 100.0 < CONFIG["SUPPRESS_MIN_T1_PCT"]:
+        reasons.append(f"목표1 거리 < {CONFIG['SUPPRESS_MIN_T1_PCT']:g}%")
+    if rr is not None and rr < CONFIG["SUPPRESS_MIN_RR"]:
+        reasons.append(f"손익비 < {CONFIG['SUPPRESS_MIN_RR']:g}")
+    return ", ".join(reasons) or None
+
+
+def cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms):
+    """v2.40 다른 주기·같은 심볼·같은 방향으로 실제 발송된 신호가 신호 시각 기준
+    CROSS_DUP_MIN분 이내(앞뒤)에 있으면 그 신호 id, 없으면 None."""
+    win = CONFIG["CROSS_DUP_MIN"] * MIN_MS
+    for s in reversed(signals):
+        if (s["symbol"] == symbol and s["side"] == side and s["tf"] != tf
+                and s.get("sent", True) and abs(bar_close_ms - s["bar_close_ms"]) <= win):
+            return s["id"]
+    return None
+
+
 def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                   fetch=lv.fetch_klines, path=None, now_ms=None):
     """신호 1건 처리. 발송했으면 저장된 레코드, 중복이면 None."""
@@ -183,6 +207,8 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         signals = load_signals(path)
         if is_duplicate(signals, symbol, tf, side, bar_open_ms):
             return None
+        sup = suppress_reason(entry, ctx["target1"], ctx["rr"])
+        dup_of = cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms)
         sig = {
             "id": max((s["id"] for s in signals), default=0) + 1,
             "time": datetime.fromtimestamp((bar_close_ms + 1) / 1000, timezone.utc).isoformat(),
@@ -196,6 +222,11 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "htf_rsi": ctx["htf_rsi"],
             "source": source,
             "errors": ctx["errors"], "price_basis": lv.price_basis(),
+            "level_src": ctx.get("src") or {},
+            # v2.40: 억제·교차 중복은 발송만 안 하고 저장·추적은 그대로
+            "suppressed": sup is not None, "suppress_reason": sup,
+            "duplicate": dup_of is not None, "dup_of": dup_of,
+            "sent": sup is None and dup_of is None,
             # 추적 상태
             "status": "open", "phase": "pre_t1", "result": None,
             "checked_until_ms": bar_close_ms, "bars": 0,
@@ -206,7 +237,12 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         }
         signals.append(sig)
         save_signals(signals, path)
-    send(format_signal_message(sig))
+    if sig["sent"]:
+        send(format_signal_message(sig))
+    else:
+        print(f"[코인신호] #{sig['id']:04d} {symbol} {tf} {side} 발송 안 함 — "
+              f"{'억제: ' + sup if sup else ''}{' / ' if sup and dup_of else ''}"
+              f"{'중복: #%04d' % dup_of if dup_of else ''}")
     return sig
 
 
@@ -447,7 +483,9 @@ def track_open_signals(send, fetch=lv.fetch_klines, path=None, now_ms=None):
         for s in signals:
             if s.get("status") == "open" and s["symbol"] in fetched:
                 before = (s["checked_until_ms"], s["status"])
-                msgs += update_signal(s, fetched[s["symbol"]], now_ms)
+                out = update_signal(s, fetched[s["symbol"]], now_ms)
+                if s.get("sent", True):      # 억제·중복 신호는 결과도 조용히 기록만
+                    msgs += out
                 changed = changed or before != (s["checked_until_ms"], s["status"])
         if changed:
             save_signals(signals, path)
@@ -467,8 +505,12 @@ def _rate(sub):
 
 
 def summarize(signals, now_ms, days):
+    """주 통계는 발송된 신호만. 억제·중복은 건수와 억제 신호 도달률을 따로."""
     since = now_ms - days * 86_400_000
-    sub = [s for s in signals if s["bar_close_ms"] >= since]
+    window = [s for s in signals if s["bar_close_ms"] >= since]
+    sub = [s for s in window if s.get("sent", True)]
+    supp = [s for s in window if s.get("suppressed")]
+    supp_dec = [s for s in supp if s.get("result")]
     dec = [s for s in sub if s.get("result")]
     n_dec = len(dec)
 
@@ -487,6 +529,13 @@ def summarize(signals, now_ms, days):
         "rr_lt1": _rate([s for s in sub if s.get("rr") is not None and s["rr"] < 1]),
         "cloud_with": _rate([s for s in sub if (s.get("cloud") or {}).get("bias") == "편"]),
         "cloud_against": _rate([s for s in sub if (s.get("cloud") or {}).get("bias") == "역"]),
+        "n_suppressed": len(supp),
+        "n_duplicate": sum(1 for s in window if s.get("duplicate")),
+        "supp_decided": len(supp_dec),
+        "supp_t1_rate": (sum(1 for s in supp_dec if s["result"] in ("hit_target1", "hit_target2"))
+                         / len(supp_dec) * 100.0) if supp_dec else None,
+        "supp_stop_rate": (sum(1 for s in supp_dec if s["result"] == "hit_stop")
+                           / len(supp_dec) * 100.0) if supp_dec else None,
     }
 
 
@@ -500,6 +549,10 @@ def format_summary(sums, now_ms):
     for s in sums:
         lines.append("")
         lines.append(f"[최근 {s['days']}일] 신호 {s['n']} (판정 {s['decided']}, 진행 {s['pending']})")
+        lines.append(f"억제 {s['n_suppressed']}건 / 중복 {s['n_duplicate']}건")
+        if s["supp_decided"]:
+            lines.append(f"억제 신호: 목표1 {_r(s['supp_t1_rate'])} · 손절 {_r(s['supp_stop_rate'])} "
+                         f"(판정 {s['supp_decided']}건)")
         if not s["decided"]:
             continue
         lines.append(f"목표1 도달 {_r(s['t1_rate'])} · 손절 {_r(s['stop_rate'])} · 만료 {_r(s['expired_rate'])}")

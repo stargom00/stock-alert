@@ -186,3 +186,53 @@ def test_build_context_records_reasons():
     assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
                              for k in ("levels", "cloud", "htf_rsi")}
     assert lv.price_basis() == "현물"
+
+
+# ── v2.40 최소 거리·구간 극값 ──
+
+# 스윙 저점 99.9(idx3)·99.0(idx7)·98.0(idx11), 스윙 고점 100.6(idx9).
+# 양 끝(0~2, 13~15)은 스윙 후보가 아님 — 최고가 100.7(idx14), 최저가 97.0(idx15)
+_L = [100.2, 100.1, 100.0, 99.9, 100.0, 100.1, 100.2, 99.0, 100.2, 100.3, 100.2, 98.0, 100.2, 100.3, 100.4, 97.0]
+MIN_BARS = [B(l + 0.3, l) for l in _L]
+
+
+def test_swing_closer_than_min_dist_skipped():
+    lv_ = lv.compute_levels(MIN_BARS, "short", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)
+    # 99.9 스윙 → 99.95(0.05%) 건너뜀 → 다음 스윙들
+    assert lv_["target1"] == pytest.approx(99.0 * 1.0005)
+    assert lv_["target2"] == pytest.approx(98.0 * 1.0005)
+    assert lv_["stop"] == pytest.approx(100.6 * 1.0005)
+    assert lv_["src"] == {"target1": "swing", "target2": "swing", "stop": "swing"}
+    # 최소 거리 0이면(옛 동작) 99.9 스윙이 목표1
+    assert lv.compute_levels(MIN_BARS, "short", 100.0, k=3, pad_pct=0.05,
+                             min_dist_pct=0)["target1"] == pytest.approx(99.9 * 1.0005)
+
+
+def test_stop_falls_back_to_window_extreme():
+    # 진입 100.55: 스윙 고점 100.6 → 100.65(0.10%) 건너뜀 → 최고가 100.7 +0.1%
+    lv_ = lv.compute_levels(MIN_BARS, "short", 100.55, k=3, pad_pct=0.05,
+                            min_dist_pct=0.15, extreme_pad_pct=0.1)
+    assert lv_["stop"] == pytest.approx(100.7 * 1.001)
+    assert lv_["src"]["stop"] == "extreme"
+
+
+def test_extreme_also_too_close_is_none():
+    lv_ = lv.compute_levels(MIN_BARS, "short", 100.69, k=3, pad_pct=0.05,
+                            min_dist_pct=0.15, extreme_pad_pct=0.1)
+    assert lv_["stop"] is None and lv_["rr"] is None
+
+
+def test_target2_falls_back_to_window_extreme():
+    # 진입 98.8: 목표 스윙은 98.0 하나 → 목표2 = 최저가 97.0 +0.1%
+    lv_ = lv.compute_levels(MIN_BARS, "short", 98.8, k=3, pad_pct=0.05,
+                            min_dist_pct=0.15, extreme_pad_pct=0.1)
+    assert lv_["target1"] == pytest.approx(98.0 * 1.0005)
+    assert lv_["target2"] == pytest.approx(97.0 * 1.001)
+    assert lv_["src"]["target2"] == "extreme"
+
+
+def test_long_min_dist_mirror():
+    bars = [B(200 - b["l"], 200 - b["h"]) for b in MIN_BARS]
+    lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)
+    assert lv_["target1"] == pytest.approx(101.0 * 0.9995)   # 100.1 스윙(0.05%) 건너뜀
+    assert lv_["stop"] == pytest.approx(99.4 * 0.9995)
