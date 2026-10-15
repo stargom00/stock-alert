@@ -68,3 +68,11 @@ def test_get_coin_signals_readonly(base, tmp_path, monkeypatch):
     assert requests.get(base + "/api/coin-signals", timeout=5).status_code == 401
     assert requests.get(base + "/api/coin-signals", headers={"X-Api-Read-Token": "rt"},
                         timeout=5).status_code == 200
+
+
+def test_get_coin_positions_readonly(base, tmp_path):
+    import coin_positions as cp
+    cp.save_positions([{"id": 1, "symbol": "BTCUSDT"}], str(tmp_path / "positions.json"))
+    r = requests.get(base + "/api/coin-positions", timeout=5)
+    assert r.status_code == 200 and r.json()["count"] == 1
+    assert requests.post(base + "/api/coin-positions", timeout=5).status_code == 404

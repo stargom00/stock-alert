@@ -74,9 +74,8 @@ CONFIG = {
     "LEVEL_LOOKBACK": _env_int("COIN_LEVEL_LOOKBACK", "200"),   # 스윙 탐색 봉 수
     "MIN_LEVEL_DIST_PCT": _env_float("COIN_MIN_LEVEL_DIST_PCT", "0.15"),  # v2.40 진입가에서 이보다 가까운 목표·손절 스윙은 건너뜀
     "EXTREME_PAD_PCT": _env_float("COIN_EXTREME_PAD_PCT", "0.1"),         # v2.40 스윙 없을 때 구간 극값 여유 %
-    # v2.40 알림 억제(저장·추적은 함): 목표1 거리 < 이 값 % 또는 손익비 < 이 값
+    # v2.40 알림 억제(저장·추적은 함): 목표1 거리 < 이 값 % (v2.41: 손익비 기준 삭제)
     "SUPPRESS_MIN_T1_PCT": _env_float("COIN_SUPPRESS_MIN_T1_PCT", "0.15"),
-    "SUPPRESS_MIN_RR": _env_float("COIN_SUPPRESS_MIN_RR", "0.5"),
     "CROSS_DUP_MIN": _env_float("COIN_CROSS_DUP_MIN", "10"),  # v2.40 다른 주기 같은 방향 발송 후 이 분 이내면 중복
     # 상위 주기 맥락
     "CLOUD_TF": os.environ.get("COIN_CLOUD_TF", "30m"),
@@ -86,7 +85,14 @@ CONFIG = {
     "ICHI_DISPLACEMENT": 26,  # "선행 26봉". 실제 이동은 26-1=25봉 — 트레이딩뷰 기본 Ichimoku와 동일
     "HTF_RSI_TF": os.environ.get("COIN_HTF_RSI_TF", "2h"),
     # 추적
-    "EXPIRE_HOURS": _env_float("COIN_EXPIRE_HOURS", "24"),
+    "EXPIRE_HOURS": _env_float("COIN_EXPIRE_HOURS", "24"),    # 신호 단위 기록(조용히)
+    # v2.41 포지션(채널 방식, 손절 없음) — 봇은 주문 안 함, 가상 수량으로 추적만
+    "LIQ_PCT": _env_float("COIN_LIQ_PCT", "9"),                    # 청산가 참고: 10배 격리 ≈ 진입가 ∓9%
+    "ADD_THRESHOLD_PCT": _env_float("COIN_ADD_THRESHOLD_PCT", "0.5"),  # 평단 대비 이만큼 역행 중 같은 방향 신호 → 추가
+    "MAX_ADDS": _env_int("COIN_MAX_ADDS", "2"),
+    "ADD_QTY": _env_float("COIN_ADD_QTY", "1"),                    # 추가 1회 수량 (1차 = 1단위)
+    "GIVEUP_PCT": _env_float("COIN_GIVEUP_PCT", "3"),              # 평단 대비 역행 포기선
+    "POS_EXPIRE_HOURS": _env_float("COIN_POS_EXPIRE_HOURS", "72"),
     "SUMMARY_TIME_NZ": os.environ.get("COIN_SUMMARY_TIME", "09:00"),
 }
 
@@ -231,52 +237,42 @@ def find_swings(bars, k=None):
 
 
 def compute_levels(bars, side, entry, k=None, pad_pct=None, min_dist_pct=None, extreme_pad_pct=None):
-    """목표1/2·손절·손익비.
+    """목표1/2. (v2.41: 채널 방식 — 손절·손익비 없음)
     숏: 진입가 아래 스윙 저점을 가까운 순으로 목표1·목표2(저점 +여유 — 닿기
-    직전에 익절), 진입가 위 가장 가까운 스윙 고점 +여유 = 손절(고점 바깥).
-    롱은 대칭(목표 = 고점 −여유, 손절 = 저점 −여유).
+    직전에 익절). 롱은 대칭(고점 −여유).
     v2.40: 여유 적용 후 진입가 대비 min_dist_pct(0.15%) 미만인 스윙은 건너뛰고
-    다음 스윙. 쓸 스윙이 모자라면 구간 극값(숏 목표 = 최저가 +0.1%, 숏 손절 =
-    최고가 +0.1%, 롱 대칭)을 같은 조건(방향·최소 거리, 목표2는 목표1보다 멀리)
-    으로 한 번 더 시도. 그래도 없으면 None. src = 각 값의 출처 swing/extreme."""
+    다음 스윙. 모자라면 구간 극값(숏 = 최저가 +0.1%, 롱 = 최고가 −0.1%)을 같은
+    조건(방향·최소 거리, 목표2는 목표1보다 멀리)으로 시도. 그래도 없으면 None.
+    src = 각 값의 출처 swing/extreme."""
     k = CONFIG["SWING_K"] if k is None else k
     pad = (CONFIG["LEVEL_PAD_PCT"] if pad_pct is None else pad_pct) / 100.0
     min_d = (CONFIG["MIN_LEVEL_DIST_PCT"] if min_dist_pct is None else min_dist_pct) / 100.0
     xpad = (CONFIG["EXTREME_PAD_PCT"] if extreme_pad_pct is None else extreme_pad_pct) / 100.0
     lows, highs = find_swings(bars, k)
-    low_px = sorted({p for _, p in lows})
-    high_px = sorted({p for _, p in highs})
     sign = 1 if side == "long" else -1      # 목표 쪽 방향
 
-    def ok(level, toward_target):
-        d = (level - entry) / entry * (sign if toward_target else -sign)
-        return d >= min_d
+    def ok(level):
+        return (level - entry) / entry * sign >= min_d
 
     if side == "short":
-        targets = [p * (1 + pad) for p in reversed(low_px)]
-        stops = [p * (1 + pad) for p in high_px]
+        targets = [p * (1 + pad) for p in sorted({p for _, p in lows}, reverse=True)]
         x_target = min(b["l"] for b in bars) * (1 + xpad) if bars else None
-        x_stop = max(b["h"] for b in bars) * (1 + xpad) if bars else None
     else:
-        targets = [p * (1 - pad) for p in high_px]
-        stops = [p * (1 - pad) for p in reversed(low_px)]
+        targets = [p * (1 - pad) for p in sorted({p for _, p in highs})]
         x_target = max(b["h"] for b in bars) * (1 - xpad) if bars else None
-        x_stop = min(b["l"] for b in bars) * (1 - xpad) if bars else None
-    targets = [(p, "swing") for p in targets if ok(p, True)]
-    stops = [(p, "swing") for p in stops if ok(p, False)]
-    if len(targets) < 2 and x_target is not None and ok(x_target, True) and \
+    targets = [(p, "swing") for p in targets if ok(p)]
+    if len(targets) < 2 and x_target is not None and ok(x_target) and \
             (not targets or (x_target - targets[-1][0]) * sign > 0):
         targets.append((x_target, "extreme"))
-    if not stops and x_stop is not None and ok(x_stop, False):
-        stops.append((x_stop, "extreme"))
     t1, s1 = targets[0] if targets else (None, None)
     t2, s2 = targets[1] if len(targets) > 1 else (None, None)
-    stop, ss = stops[0] if stops else (None, None)
-    rr = None
-    if t1 is not None and stop is not None and stop != entry:
-        rr = abs(entry - t1) / abs(stop - entry)
-    return {"target1": t1, "target2": t2, "stop": stop, "rr": rr,
-            "src": {"target1": s1, "target2": s2, "stop": ss}}
+    return {"target1": t1, "target2": t2, "src": {"target1": s1, "target2": s2}}
+
+
+def liquidation_price(side, entry, pct=None):
+    """v2.41 청산가 참고(격리 10배 기준 진입가 ∓LIQ_PCT%). 롱은 아래, 숏은 위."""
+    pct = CONFIG["LIQ_PCT"] if pct is None else pct
+    return entry * (1 - pct / 100.0) if side == "long" else entry * (1 + pct / 100.0)
 
 
 def ichimoku_cloud(bars, tenkan=None, kijun=None, senkou_b=None, displacement=None):
@@ -345,7 +341,7 @@ def _err_text(e):
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게)."""
-    out = {"target1": None, "target2": None, "stop": None, "rr": None, "src": {},
+    out = {"target1": None, "target2": None, "src": {},
            "cloud": None, "htf_rsi": None, "errors": {}}   # {"levels"|"cloud"|"htf_rsi": 사유}
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)

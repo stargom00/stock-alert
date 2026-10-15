@@ -2,6 +2,7 @@
 
   POST /tv-webhook       트레이딩뷰 알람 수신. 토큰 검증 후 큐에 넣고 즉시 200.
   GET  /api/coin-signals 저장된 신호·추적 결과(읽기 전용).
+  GET  /api/coin-positions 가상 포지션·이벤트(읽기 전용, v2.41).
   GET  /health           200 ok
 
 토큰: 트레이딩뷰 Webhook은 커스텀 HTTP 헤더를 못 보내므로 헤더
@@ -15,6 +16,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import coin_positions as cp
 import signal_tracker as tr
 from signal_levels import CONFIG
 
@@ -64,12 +66,15 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/health":
             return self._send(200, {"ok": True})
-        if url.path == "/api/coin-signals":
+        if url.path in ("/api/coin-signals", "/api/coin-positions"):
             need = os.environ.get("COIN_API_READ_TOKEN", "")
             if need and not _token_ok(need, self.headers.get("X-Api-Read-Token", "")):
                 return self._send(401, {"error": "unauthorized"})
-            sigs = tr.load_signals()
-            return self._send(200, {"count": len(sigs), "signals": sigs})
+            if url.path == "/api/coin-signals":
+                sigs = tr.load_signals()
+                return self._send(200, {"count": len(sigs), "signals": sigs})
+            ps = cp.load_positions()
+            return self._send(200, {"count": len(ps), "positions": ps})
         return self._send(404, {"error": "not found"})
 
 

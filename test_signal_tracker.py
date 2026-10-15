@@ -39,16 +39,12 @@ def m1(sig, k, h, l, c=None):
 FAR = utc_ms(2030, 1, 1)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+
 # ── 추적 ──
-
-def test_same_bar_target_and_stop_is_stop():
-    s = base_sig()
-    msgs = tr.update_signal(s, [m1(s, 1, 100.2, 99.9), m1(s, 2, 101.2, 98.9)], FAR)
-    assert s["result"] == "hit_stop" and s["status"] == "done"
-    assert s["result_bars"] == 2
-    assert s["result_pct"] == pytest.approx(-1.0)
-    assert msgs == ["#0042 숏 → 손절 (−1.00%, 2분)"]
-
 
 def test_target1_then_target2_upgrades():
     s = base_sig()
@@ -60,18 +56,6 @@ def test_target1_then_target2_upgrades():
     assert m_b == ["#0042 숏 → 목표2 도달 (+2.00%, 3분)"]
     assert s["mfe_pct"] == pytest.approx(2.1)
     assert s["mae_pct"] == pytest.approx(0.1)
-
-
-def test_target1_then_stop_keeps_target1():
-    s = base_sig()
-    tr.update_signal(s, [m1(s, 1, 100.1, 98.9), m1(s, 2, 101.5, 99.5)], FAR)
-    assert s["result"] == "hit_target1" and s["after_t1"] == "stop" and s["status"] == "done"
-
-
-def test_long_symmetric_stop():
-    s = base_sig(side="long", target1=101.0, target2=102.0, stop=99.0)
-    msgs = tr.update_signal(s, [m1(s, 1, 101.1, 98.9)], FAR)
-    assert s["result"] == "hit_stop" and msgs == ["#0042 롱 → 손절 (−1.00%, 1분)"]
 
 
 def test_expire_after_24h():
@@ -98,19 +82,20 @@ def test_unclosed_bar_ignored():
 # ── 메시지 ──
 
 def test_signal_message_format():
-    s = base_sig(entry=81206.0, target1=81190.0, target2=81040.0, stop=81555.0, rr=0.46,
+    s = base_sig(entry=81206.0, target1=81040.0, target2=80900.0,
                  bar_open_ms=utc_ms(2026, 10, 15, 8, 0),
                  cloud={"pos": "above", "thick_pct": 1.5, "bias": "역"},
-                 htf_rsi={"value": 38.2, "dir": "↓"})
+                 htf_rsi={"value": 38.2, "dir": "↓"},
+                 position_note="포지션 #P12 추가 2회차 (평단 81,100 → 81,153)")
     assert tr.format_signal_message(s).split("\n") == [
         "🔻 BTCUSDT 5m 숏 신호 08:05 UTC (17:05 KST / 21:05 NZ)",
         "진입 참고 81,206",
-        "목표1 81,190 (−0.02%) ⚠️",
-        "목표2 81,040 (−0.20%)",
-        "손절 81,555 (+0.43%)",
-        "손익비 0.5 ⚠️",
+        "목표1 81,040 (−0.20%)",
+        "목표2 80,900 (−0.38%)",
+        "청산가(10배 격리): 88,515 (+9.00%)",
         "30m 구름: 위, 두께 1.5% → 숏 역",
         "2h RSI 38 ↓",
+        "포지션 #P12 추가 2회차 (평단 81,100 → 81,153)",
         "신호ID #0042",
         "가격 기준: 현물",
     ]
@@ -127,11 +112,13 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     assert set(sig["errors"]) == {"levels", "cloud", "htf_rsi"}
     lines = sent[0].split("\n")
     assert lines[2:] == [
-        "목표/손절 —",
+        "목표 —",
+        "청산가(10배 격리): 73,579 (−9.00%)",
         "30m 구름 —",
         "2h RSI —",
-        "⚠️ 목표/손절·30m 구름·2h RSI 조회 실패: "
+        "⚠️ 목표·30m 구름·2h RSI 조회 실패: "
         "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
+        "포지션: 신규 1차 #P1",
         "신호ID #0001",
         "가격 기준: 현물",
     ]
@@ -152,9 +139,10 @@ def test_ingest_dedup_n_bars(tmp_path):
     assert a["id"] == 1
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, t0, "self", sent.append, _fake_fetch_levels, p) is None
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 11 * 300_000, "self", sent.append, _fake_fetch_levels, p) is None
-    assert tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 2
+    opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
+    assert opp["id"] == 2 and opp["opposite_of"] == 1 and not opp["sent"]   # v2.41 반대 방향 = 저장만
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
-    assert len(sent) == 3
+    assert len(sent) == 2
     saved = tr.load_signals(p)
     assert [s["source"] for s in saved] == ["webhook", "self", "self"]
     assert saved[0]["status"] == "open" and saved[0]["target1"] is None
@@ -245,98 +233,55 @@ def test_parse_webhook_rejects(body):
         tr.parse_webhook_payload(body)
 
 
-# ── 요약 ──
+# ── v2.40 알림 억제·교차 중복 (v2.41: 억제는 목표1 거리만) ──
 
-def test_summary_breakdown():
-    now = utc_ms(2026, 10, 15, 20, 0)
-    t = now - 86_400_000
-
-    def S(result, rr, bias, mfe, mae, status="done", days_ago=1):
-        return base_sig(bar_open_ms=now - days_ago * 86_400_000, result=result, rr=rr,
-                        cloud={"pos": "above", "thick_pct": 1, "bias": bias},
-                        mfe_pct=mfe, mae_pct=mae, status=status)
-
-    sigs = [S("hit_target1", 1.5, "편", 0.4, 0.1), S("hit_stop", 0.5, "역", 0.1, 0.5),
-            S("hit_target2", 2.0, "편", 0.6, 0.2), S("expired", 0.8, "편", 0.2, 0.3),
-            S(None, 1.2, "편", 0.0, 0.0, status="open"), S("hit_stop", 1.1, "역", 0.0, 0.4, days_ago=20)]
-    s7 = tr.summarize(sigs, now, 7)
-    assert (s7["n"], s7["decided"], s7["pending"]) == (5, 4, 1)
-    assert s7["t1_rate"] == pytest.approx(50) and s7["stop_rate"] == pytest.approx(25)
-    assert s7["expired_rate"] == pytest.approx(25)
-    assert s7["avg_mfe"] == pytest.approx(0.325) and s7["avg_mae"] == pytest.approx(0.275)
-    assert s7["rr_ge1"] == (pytest.approx(100), 2)
-    assert s7["cloud_with"] == (pytest.approx(200 / 3), 3)
-    assert s7["cloud_against"] == (pytest.approx(0), 1)
-    s30 = tr.summarize(sigs, now, 30)
-    assert s30["n"] == 6 and s30["rr_ge1"] == (pytest.approx(200 / 3), 3)
-    text = tr.format_summary([s7, s30], now)
-    assert "[최근 7일] 신호 5 (판정 4, 진행 1)" in text
-    assert "손익비≥1: 목표1 100% (2건)" in text
-    assert "30m 구름 편: 목표1 67% (3건) · 역: 0% (1건)" in text
-
-
-# ── v2.40 알림 억제·교차 중복 ──
-
-def _ctx(target1=None, stop=None, rr=None):
-    return {"target1": target1, "target2": None, "stop": stop, "rr": rr, "src": {},
+def _ctx(target1=None, target2=None):
+    return {"target1": target1, "target2": target2, "src": {},
             "cloud": None, "htf_rsi": None, "errors": {}}
 
 
 def test_suppress_reason_thresholds():
-    assert tr.suppress_reason(100.0, 99.0, 0.4) == "손익비 < 0.5"
-    assert tr.suppress_reason(100.0, 99.0, 0.5) is None              # 0.5는 발송
-    assert tr.suppress_reason(100.0, 99.9, 2.0) == "목표1 거리 < 0.15%"
-    assert tr.suppress_reason(100.0, None, None) is None             # 값 없으면 판정 안 함
+    assert tr.suppress_reason(100.0, 99.9) == "목표1 거리 < 0.15%"
+    assert tr.suppress_reason(100.0, 99.85) is None             # 0.15%는 발송
+    assert tr.suppress_reason(100.0, None) is None              # 값 없으면 판정 안 함
 
 
-def test_rr_04_suppressed_but_saved_and_tracked(tmp_path, monkeypatch):
+def test_suppressed_saved_and_tracked_silently(tmp_path, monkeypatch):
     p = str(tmp_path / "s.json")
-    monkeypatch.setattr(tr.lv, "build_signal_context",
-                        lambda *a, **kw: _ctx(target1=99.6, stop=101.0, rr=0.4))
+    monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: _ctx(target1=99.9))
     sent = []
-    t0 = utc_ms(2026, 10, 16, 8, 0)
-    sig = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, t0, "self", sent.append, path=p)
+    sig = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
     assert sent == []
-    assert (sig["suppressed"], sig["suppress_reason"], sig["sent"]) == (True, "손익비 < 0.5", False)
-    assert tr.load_signals(p)[0]["status"] == "open"
-    # 추적은 그대로 — 손절 도달이 기록되지만 결과 한 줄도 발송 안 함
+    assert (sig["suppressed"], sig["sent"], sig["position_id"]) == (True, False, None)   # 포지션도 안 만듦
     s = tr.load_signals(p)[0]
-    bars = [m1(s, 1, 101.2, 99.9)]
-    tr.track_open_signals(sent.append, fetch=lambda *a, **kw: bars, path=p, now_ms=FAR)
-    assert sent == []
-    assert tr.load_signals(p)[0]["result"] == "hit_stop"
+    tr.track_open_signals(sent.append, fetch=lambda *a, **kw: [m1(s, 1, 100.1, 99.8)], path=p, now_ms=FAR)
+    assert sent == []                                            # 신호 단위 기록은 발송 안 함
+    assert tr.load_signals(p)[0]["result"] == "hit_target1"
 
 
 def test_cross_tf_duplicate(tmp_path, monkeypatch):
     p = str(tmp_path / "s.json")
     monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: _ctx())
     sent = []
-    t5 = utc_ms(2026, 10, 16, 8, 0)                  # 5m ② 08:00~08:05, 마감 08:05
-    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, t5, "self", sent.append, path=p)
+    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
     assert a["sent"]
-    # 1m ② 마감 08:15 = 5m 마감 + 10분 → 중복
+    # 1m ② 마감 08:15 = 5m 마감 08:05 + 10분 → 중복
     b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 14), "self", sent.append, path=p)
-    assert (b["duplicate"], b["dup_of"], b["sent"]) == (True, a["id"], False)
-    # 다른 방향은 중복 아님
-    c = tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, utc_ms(2026, 10, 16, 8, 6), "self", sent.append, path=p)
-    assert c["sent"] and not c["duplicate"]
-    assert len(sent) == 2
-    # 반대 방향: 1m 발송 뒤 10분 안 5m → 중복
+    assert (b["duplicate"], b["dup_of"], b["sent"], b["position_id"]) == (True, a["id"], False, None)
+    # 반대: 1m 발송 뒤 10분 안 5m → 중복
     d = tr.ingest_signal("ETHUSDT", "1m", "long", 10.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
     e = tr.ingest_signal("ETHUSDT", "5m", "long", 10.0, utc_ms(2026, 10, 16, 9, 5), "self", sent.append, path=p)
     assert d["sent"] and (e["duplicate"], e["dup_of"]) == (True, d["id"])
-    # 5m 같은 주기 12봉 안 재신호는 기존 규칙대로 저장도 안 함
-    f = tr.ingest_signal("ETHUSDT", "5m", "long", 10.0, utc_ms(2026, 10, 16, 9, 10), "self", sent.append, path=p)
-    assert f is None   # 이건 5m 같은 주기 12봉 중복 제거 — 저장 자체 안 함
     # 10분 초과면 중복 아님 (1m 마감 09:01, 5m 마감 09:15 → 14분)
     g = tr.ingest_signal("SOLUSDT", "1m", "short", 1.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
     h = tr.ingest_signal("SOLUSDT", "5m", "short", 1.0, utc_ms(2026, 10, 16, 9, 10), "self", sent.append, path=p)
     assert g["sent"] and h["sent"] and not h["duplicate"]
+    assert len(sent) == 4
 
 
 def test_suppressed_signal_is_not_cross_dup_reference(tmp_path, monkeypatch):
     p = str(tmp_path / "s.json")
-    ctxs = iter([_ctx(target1=99.6, stop=101.0, rr=0.4), _ctx()])
+    ctxs = iter([_ctx(target1=99.9), _ctx()])
     monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: next(ctxs))
     sent = []
     a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
@@ -344,18 +289,17 @@ def test_suppressed_signal_is_not_cross_dup_reference(tmp_path, monkeypatch):
     assert a["suppressed"] and b["sent"] and not b["duplicate"] and len(sent) == 1
 
 
-def test_summary_suppressed_and_duplicate_lines():
+# ── 요약 (v2.41: 포지션 기준 + 신호 한 줄) ──
+
+def test_signal_counts_line():
     now = utc_ms(2026, 10, 16, 20, 0)
-
-    def S(result, **kw):
-        return base_sig(bar_open_ms=now - 86_400_000, result=result, status="done", **kw)
-
-    sigs = [S("hit_target1"), S("hit_stop"),
-            S("hit_target1", suppressed=True, sent=False), S("hit_stop", suppressed=True, sent=False),
-            S("hit_stop", suppressed=True, sent=False), S("hit_target2", duplicate=True, sent=False)]
-    s7 = tr.summarize(sigs, now, 7)
-    assert (s7["n"], s7["n_suppressed"], s7["n_duplicate"]) == (2, 3, 1)
-    assert s7["t1_rate"] == pytest.approx(50)                  # 주 통계는 발송분만
-    text = tr.format_summary([s7], now)
-    assert "억제 3건 / 중복 1건" in text
-    assert "억제 신호: 목표1 33% · 손절 67% (판정 3건)" in text
+    t = now - 86_400_000
+    sigs = [base_sig(bar_open_ms=t), base_sig(bar_open_ms=t, suppressed=True, sent=False),
+            base_sig(bar_open_ms=t, duplicate=True, sent=False),
+            base_sig(bar_open_ms=t, opposite_of=3, sent=False),
+            base_sig(bar_open_ms=now - 20 * 86_400_000)]
+    text = tr.format_summary(sigs, [], now)
+    lines = text.split("\n")
+    assert lines[0].startswith("📊 코인 요약 (")
+    assert "신호: 발송 1 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines
+    assert "신호: 발송 2 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines   # 30일

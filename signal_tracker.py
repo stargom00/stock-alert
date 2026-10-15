@@ -6,8 +6,10 @@
      트레이딩뷰 Webhook 타임아웃이 짧아서 바이낸스 조회를 응답 경로에서 안 함).
   B. self_detect(): 설정된 심볼·주기의 봉 마감마다 같은 규칙으로 판정.
   둘 다 ingest_signal()로 모여 중복 제거 → 레벨 계산 → 저장 → 발송.
-  track_open_signals(): 1분마다 1m 봉으로 목표/손절 도달 확인.
-  daily_summary(): 매일 09:00 NZ.
+  coin_positions: 발송 신호로 가상 포지션(채널 방식, 손절 없음) 신규/추가,
+     1분마다 덜어내기·목표·포기선·만료 추적 (v2.41).
+  track_open_signals(): 신호 단위 목표 도달 기록(발송 없음).
+  daily_summary(): 매일 09:00 NZ, 포지션 기준.
 
 저장: $DATA_DIR/coin_signals.json (기존 sent_log.json과 같은 DATA_DIR 규칙).
 바이낸스 공개 klines만 읽는다(기본 현물 data-api.binance.vision, v2.39). 주문 기능 없음.
@@ -21,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 
 import pytz
 
+import coin_positions as cp
 import signal_levels as lv
 from signal_levels import CONFIG, TF_MS
 
@@ -114,15 +117,13 @@ def format_signal_message(sig):
     entry = sig["entry"]
     side_ko = _SIDE_KO[sig["side"]]
     head = "🔺" if sig["side"] == "long" else "🔻"
-    rr = sig.get("rr")
-    rr_warn = rr is not None and rr < 1
     errs = sig.get("errors") or {}
     lines = [f"{head} {sig['symbol']} {sig['tf']} {side_ko} 신호 {fmt_signal_time(sig['bar_close_ms'])}",
              f"진입 참고 {fmt_px(entry)}"]
     if "levels" in errs:
-        lines.append("목표/손절 —")   # 조회 실패를 "없음"(스윙 0개)과 구분
+        lines.append("목표 —")   # 조회 실패를 "없음"(스윙 0개)과 구분
     else:
-        for key, label in (("target1", "목표1"), ("target2", "목표2"), ("stop", "손절")):
+        for key, label in (("target1", "목표1"), ("target2", "목표2")):
             v = sig.get(key)
             if v is None:
                 lines.append(f"{label} 없음")
@@ -130,10 +131,10 @@ def format_signal_message(sig):
             line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
             if (sig.get("level_src") or {}).get(key) == "extreme":
                 line += " 구간 극값"
-            if key == "target1" and rr_warn:
-                line += " ⚠️"
             lines.append(line)
-        lines.append(f"손익비 {rr:.1f}" + (" ⚠️" if rr_warn else "") if rr is not None else "손익비 —")
+    # v2.41: 손절·손익비 대신 청산가 참고(채널 방식 — 강제청산 리스크만 관리)
+    liq = lv.liquidation_price(sig["side"], entry)
+    lines.append(f"청산가(10배 격리): {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})")
     c = sig.get("cloud")
     if c:
         tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
@@ -146,13 +147,15 @@ def format_signal_message(sig):
     else:
         lines.append(f"{CONFIG['HTF_RSI_TF']} RSI —")
     # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
-    labels = {"levels": "목표/손절", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI"}
+    labels = {"levels": "목표", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI"}
     by_reason = {}
     for k in ("levels", "cloud", "htf_rsi"):
         if k in errs:
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
         lines.append(f"⚠️ {'·'.join(what)} 조회 실패: {reason}")
+    if sig.get("position_note"):
+        lines.append(sig["position_note"])
     lines.append(f"신호ID #{sig['id']:04d}")
     lines.append(f"가격 기준: {sig.get('price_basis') or lv.price_basis()}")
     return "\n".join(lines)
@@ -170,14 +173,12 @@ def is_duplicate(signals, symbol, tf, side, bar_open_ms, n_bars=None):
                and abs(bar_open_ms - s["bar_open_ms"]) < span for s in signals)
 
 
-def suppress_reason(entry, target1, rr):
-    """v2.40 알림 억제 사유(없으면 None). 값이 없는 항목(None)은 판정하지 않음."""
-    reasons = []
+def suppress_reason(entry, target1):
+    """알림 억제 사유(없으면 None). v2.41: 목표1 거리 기준만(손익비 기준 삭제).
+    목표1이 없으면 판정하지 않음."""
     if target1 is not None and abs(target1 - entry) / entry * 100.0 < CONFIG["SUPPRESS_MIN_T1_PCT"]:
-        reasons.append(f"목표1 거리 < {CONFIG['SUPPRESS_MIN_T1_PCT']:g}%")
-    if rr is not None and rr < CONFIG["SUPPRESS_MIN_RR"]:
-        reasons.append(f"손익비 < {CONFIG['SUPPRESS_MIN_RR']:g}")
-    return ", ".join(reasons) or None
+        return f"목표1 거리 < {CONFIG['SUPPRESS_MIN_T1_PCT']:g}%"
+    return None
 
 
 def cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms):
@@ -192,8 +193,10 @@ def cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms):
 
 
 def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
-                  fetch=lv.fetch_klines, path=None, now_ms=None):
-    """신호 1건 처리. 발송했으면 저장된 레코드, 중복이면 None."""
+                  fetch=lv.fetch_klines, path=None, now_ms=None, pos_path=None):
+    """신호 1건 처리. 저장된 레코드(발송 여부는 sig["sent"]), 같은 주기 중복이면 None.
+    발송 대상이면 포지션에 반영(신규/추가/보유), 반대 방향 포지션이 열려 있으면
+    저장만(opposite_of)."""
     bar_close_ms = bar_open_ms + TF_MS[tf] - 1
     with _lock:
         signals = load_signals(path)
@@ -207,7 +210,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         signals = load_signals(path)
         if is_duplicate(signals, symbol, tf, side, bar_open_ms):
             return None
-        sup = suppress_reason(entry, ctx["target1"], ctx["rr"])
+        sup = suppress_reason(entry, ctx["target1"])
         dup_of = cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms)
         sig = {
             "id": max((s["id"] for s in signals), default=0) + 1,
@@ -215,8 +218,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "received_ms": now_ms if now_ms is not None else int(time.time() * 1000),
             "bar_open_ms": bar_open_ms, "bar_close_ms": bar_close_ms,
             "symbol": symbol, "tf": tf, "side": side, "entry": entry,
-            "target1": ctx["target1"], "target2": ctx["target2"], "stop": ctx["stop"],
-            "rr": ctx["rr"],
+            "target1": ctx["target1"], "target2": ctx["target2"],
             "cloud": ({k: ctx["cloud"][k] for k in ("pos", "thick_pct", "bias")}
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
@@ -227,6 +229,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "suppressed": sup is not None, "suppress_reason": sup,
             "duplicate": dup_of is not None, "dup_of": dup_of,
             "sent": sup is None and dup_of is None,
+            "opposite_of": None, "position_id": None, "position_action": None, "position_note": None,
             # 추적 상태
             "status": "open", "phase": "pre_t1", "result": None,
             "checked_until_ms": bar_close_ms, "bars": 0,
@@ -235,14 +238,22 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "t1_hit_ms": None, "t1_bars": None,
             "result_ms": None, "result_bars": None, "result_pct": None, "after_t1": None,
         }
+        pre_msgs = []
+        if sig["sent"]:
+            action, line, pre_msgs, pid = cp.on_signal(sig, fetch, path=pos_path, now_ms=now_ms)
+            sig.update(position_id=pid, position_action=action, position_note=line)
+            if action == "opposite":
+                sig.update(sent=False, opposite_of=pid)
         signals.append(sig)
         save_signals(signals, path)
+    for m in pre_msgs:          # 신호 직전까지 따라잡기에서 생긴 포지션 이벤트
+        send(m)
     if sig["sent"]:
         send(format_signal_message(sig))
     else:
-        print(f"[코인신호] #{sig['id']:04d} {symbol} {tf} {side} 발송 안 함 — "
-              f"{'억제: ' + sup if sup else ''}{' / ' if sup and dup_of else ''}"
-              f"{'중복: #%04d' % dup_of if dup_of else ''}")
+        why = [x for x in (sup and f"억제: {sup}", dup_of and f"중복: #{dup_of:04d}",
+                           sig["opposite_of"] and f"반대 방향 포지션 #P{sig['opposite_of']} 보유") if x]
+        print(f"[코인신호] #{sig['id']:04d} {symbol} {tf} {side} 발송 안 함 — {' / '.join(why)}")
     return sig
 
 
@@ -376,22 +387,22 @@ def _fav_pct(sig, price):
 
 
 def update_signal(sig, bars, now_ms):
-    """마감된 1m 봉으로 sig 상태 갱신(제자리 수정). 발송할 한 줄 메시지 리스트 반환.
-    한 봉에서 손절과 목표가 같이 닿으면 손절(보수적). 목표1 도달 후에도 목표2·
-    손절·만료 중 하나까지 계속 보며, 목표2에 닿으면 결과를 hit_target2로 올림."""
+    """신호 단위 기록(v2.41부터 텔레그램 발송 없음 — 포지션 이벤트가 대신함.
+    억제·중복 신호의 "실제로 어땠는지"를 남기려고 유지). 마감된 1m 봉으로 sig
+    갱신(제자리 수정), 로그용 한 줄 리스트 반환. 손절 없음: 목표1 → (목표2
+    승격) / EXPIRE_HOURS 만료."""
     if sig["status"] != "open":
         return []
     msgs = []
-    entry, side = sig["entry"], sig["side"]
-    t1, t2, stop = sig.get("target1"), sig.get("target2"), sig.get("stop")
+    side = sig["side"]
+    t1, t2 = sig.get("target1"), sig.get("target2")
     expire_ms = sig["bar_close_ms"] + 1 + int(CONFIG["EXPIRE_HOURS"] * 3_600_000)
     side_ko = _SIDE_KO[side]
 
-    def touched(level, b, toward_profit):
+    def touched(level, b):
         if level is None:
             return False
-        up = (side == "long") == toward_profit   # 가격이 위로 가야 닿는가
-        return b["h"] >= level if up else b["l"] <= level
+        return b["h"] >= level if side == "long" else b["l"] <= level
 
     def finish():
         sig["status"] = "done"
@@ -409,25 +420,11 @@ def update_signal(sig, bars, now_ms):
         sig["mae_pct"] = max(0.0, -_fav_pct(sig, worst))
         sig["checked_until_ms"] = b["T"]
         sig["last_close"] = b["c"]
-        hit_stop = touched(stop, b, False)
-        hit_t1 = touched(t1, b, True)
-        hit_t2 = touched(t2, b, True)
+        hit_t1, hit_t2 = touched(t1, b), touched(t2, b)
         mins = sig["bars"]
-        if sig["phase"] == "pre_t1":
-            if hit_stop:
-                pct = _fav_pct(sig, stop)
-                sig.update(result="hit_stop", result_ms=b["T"] + 1, result_bars=mins, result_pct=pct)
-                msgs.append(f"#{sig['id']:04d} {side_ko} → 손절 ({fmt_pct(pct)}, {mins}분)")
-                finish()
-                break
-            if hit_t1:
-                sig.update(t1_hit_ms=b["T"] + 1, t1_bars=mins)
-                if hit_t2:
-                    pct = _fav_pct(sig, t2)
-                    sig.update(result="hit_target2", result_ms=b["T"] + 1, result_bars=mins, result_pct=pct)
-                    msgs.append(f"#{sig['id']:04d} {side_ko} → 목표2 도달 ({fmt_pct(pct)}, {mins}분)")
-                    finish()
-                    break
+        if sig["phase"] == "pre_t1" and hit_t1:
+            sig.update(t1_hit_ms=b["T"] + 1, t1_bars=mins)
+            if not hit_t2:
                 pct = _fav_pct(sig, t1)
                 sig.update(result="hit_target1", result_ms=b["T"] + 1, result_bars=mins,
                            result_pct=pct, phase="post_t1")
@@ -435,17 +432,13 @@ def update_signal(sig, bars, now_ms):
                 if t2 is None:
                     finish()
                     break
-        else:  # post_t1: 목표2 승격 또는 손절로 관찰 종료 (결과는 hit_target1 유지)
-            if hit_stop:
-                sig["after_t1"] = "stop"
-                finish()
-                break
-            if hit_t2:
-                pct = _fav_pct(sig, t2)
-                sig.update(result="hit_target2", result_ms=b["T"] + 1, result_bars=mins, result_pct=pct)
-                msgs.append(f"#{sig['id']:04d} {side_ko} → 목표2 도달 ({fmt_pct(pct)}, {mins}분)")
-                finish()
-                break
+                continue
+        if sig["phase"] in ("pre_t1", "post_t1") and sig.get("t1_hit_ms") and hit_t2:
+            pct = _fav_pct(sig, t2)
+            sig.update(result="hit_target2", result_ms=b["T"] + 1, result_bars=mins, result_pct=pct)
+            msgs.append(f"#{sig['id']:04d} {side_ko} → 목표2 도달 ({fmt_pct(pct)}, {mins}분)")
+            finish()
+            break
 
     if sig["status"] == "open" and sig["checked_until_ms"] + 1 >= expire_ms:
         if sig["phase"] == "pre_t1":
@@ -490,85 +483,35 @@ def track_open_signals(send, fetch=lv.fetch_klines, path=None, now_ms=None):
         if changed:
             save_signals(signals, path)
     for m in msgs:
-        send(m)
+        print(f"[코인신호기록] {m}")   # v2.41: 결과 알림은 포지션 이벤트로 — 신호 단위는 기록만
 
 
-# ── 요약 ──────────────────────────────────────────────────────────────
+# ── 요약 (v2.41: 포지션 기준, 신호는 한 줄) ──────────────────────────
 
-def _rate(sub):
-    """판정된 신호 중 목표1(이상) 도달률 %, 건수."""
-    dec = [s for s in sub if s.get("result")]
-    if not dec:
-        return None, 0
-    hit = sum(1 for s in dec if s["result"] in ("hit_target1", "hit_target2"))
-    return hit / len(dec) * 100.0, len(dec)
-
-
-def summarize(signals, now_ms, days):
-    """주 통계는 발송된 신호만. 억제·중복은 건수와 억제 신호 도달률을 따로."""
+def signal_counts(signals, now_ms, days):
     since = now_ms - days * 86_400_000
-    window = [s for s in signals if s["bar_close_ms"] >= since]
-    sub = [s for s in window if s.get("sent", True)]
-    supp = [s for s in window if s.get("suppressed")]
-    supp_dec = [s for s in supp if s.get("result")]
-    dec = [s for s in sub if s.get("result")]
-    n_dec = len(dec)
-
-    def share(res):
-        return sum(1 for s in dec if s["result"] in res) / n_dec * 100.0 if n_dec else None
-
-    done = [s for s in sub if s.get("status") == "done"]
-    return {
-        "days": days, "n": len(sub), "decided": n_dec, "pending": len(sub) - n_dec,
-        "t1_rate": share(("hit_target1", "hit_target2")),
-        "stop_rate": share(("hit_stop",)),
-        "expired_rate": share(("expired",)),
-        "avg_mfe": sum(s["mfe_pct"] for s in done) / len(done) if done else None,
-        "avg_mae": sum(s["mae_pct"] for s in done) / len(done) if done else None,
-        "rr_ge1": _rate([s for s in sub if s.get("rr") is not None and s["rr"] >= 1]),
-        "rr_lt1": _rate([s for s in sub if s.get("rr") is not None and s["rr"] < 1]),
-        "cloud_with": _rate([s for s in sub if (s.get("cloud") or {}).get("bias") == "편"]),
-        "cloud_against": _rate([s for s in sub if (s.get("cloud") or {}).get("bias") == "역"]),
-        "n_suppressed": len(supp),
-        "n_duplicate": sum(1 for s in window if s.get("duplicate")),
-        "supp_decided": len(supp_dec),
-        "supp_t1_rate": (sum(1 for s in supp_dec if s["result"] in ("hit_target1", "hit_target2"))
-                         / len(supp_dec) * 100.0) if supp_dec else None,
-        "supp_stop_rate": (sum(1 for s in supp_dec if s["result"] == "hit_stop")
-                           / len(supp_dec) * 100.0) if supp_dec else None,
-    }
+    w = [s for s in signals if s["bar_close_ms"] >= since]
+    return {"sent": sum(1 for s in w if s.get("sent", True)),
+            "suppressed": sum(1 for s in w if s.get("suppressed")),
+            "duplicate": sum(1 for s in w if s.get("duplicate")),
+            "opposite": sum(1 for s in w if s.get("opposite_of"))}
 
 
-def _r(x):
-    return "—" if x is None else f"{x:.0f}%"
-
-
-def format_summary(sums, now_ms):
+def format_summary(signals, positions, now_ms, windows=(7, 30)):
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
-    lines = [f"📊 코인 신호 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
-    for s in sums:
+    lines = [f"📊 코인 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
+    for days in windows:
         lines.append("")
-        lines.append(f"[최근 {s['days']}일] 신호 {s['n']} (판정 {s['decided']}, 진행 {s['pending']})")
-        lines.append(f"억제 {s['n_suppressed']}건 / 중복 {s['n_duplicate']}건")
-        if s["supp_decided"]:
-            lines.append(f"억제 신호: 목표1 {_r(s['supp_t1_rate'])} · 손절 {_r(s['supp_stop_rate'])} "
-                         f"(판정 {s['supp_decided']}건)")
-        if not s["decided"]:
-            continue
-        lines.append(f"목표1 도달 {_r(s['t1_rate'])} · 손절 {_r(s['stop_rate'])} · 만료 {_r(s['expired_rate'])}")
-        if s["avg_mfe"] is not None:
-            lines.append(f"평균 MFE {fmt_pct(s['avg_mfe'])} / MAE {fmt_pct(-s['avg_mae'])}")
-        lines.append(f"손익비≥1: 목표1 {_r(s['rr_ge1'][0])} ({s['rr_ge1'][1]}건) · "
-                     f"<1: {_r(s['rr_lt1'][0])} ({s['rr_lt1'][1]}건)")
-        lines.append(f"{CONFIG['CLOUD_TF']} 구름 편: 목표1 {_r(s['cloud_with'][0])} ({s['cloud_with'][1]}건) · "
-                     f"역: {_r(s['cloud_against'][0])} ({s['cloud_against'][1]}건)")
+        lines += cp.format_position_summary(cp.summarize_positions(positions, now_ms, days), CONFIG["CLOUD_TF"])
+        c = signal_counts(signals, now_ms, days)
+        lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
+                     f"반대방향 보류 {c['opposite']}")
     return "\n".join(lines)
 
 
-def daily_summary(send, path=None, now_ms=None):
+def daily_summary(send, path=None, pos_path=None, now_ms=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    signals = load_signals(path)
-    send(format_summary([summarize(signals, now_ms, 7), summarize(signals, now_ms, 30)], now_ms))
+    send(format_summary(load_signals(path), cp.load_positions(pos_path), now_ms))
 
 
 # ── 등록 ──────────────────────────────────────────────────────────────
@@ -592,7 +535,8 @@ def register(sched, send_telegram):
 
     sched.every(15).seconds.do(_safe(lambda: self_detect(send), "자체판정"))
     sched.every(5).seconds.do(_safe(lambda: drain_webhook_queue(send), "webhook"))
-    sched.every(1).minutes.do(_safe(lambda: track_open_signals(send), "추적"))
+    sched.every(1).minutes.do(_safe(lambda: track_open_signals(send), "신호기록"))
+    sched.every(1).minutes.do(_safe(lambda: cp.track_positions(send, lv.fetch_klines), "포지션추적"))
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
         _safe(lambda: daily_summary(send), "요약"))
     try:

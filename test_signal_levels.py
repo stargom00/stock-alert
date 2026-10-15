@@ -71,8 +71,6 @@ def test_levels_short():
     lv_ = lv.compute_levels(_short_bars(), "short", 100.0, k=3, pad_pct=0.05)
     assert lv_["target1"] == pytest.approx(98.0 * 1.0005)    # 저점 +여유
     assert lv_["target2"] == pytest.approx(95.0 * 1.0005)
-    assert lv_["stop"] == pytest.approx(103.0 * 1.0005)      # 고점 +여유(바깥)
-    assert lv_["rr"] == pytest.approx((100 - 98.049) / (103.0515 - 100))
 
 
 def test_levels_long_mirror():
@@ -81,14 +79,11 @@ def test_levels_long_mirror():
     lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05)
     assert lv_["target1"] == pytest.approx(102.0 * 0.9995)   # 고점 −여유
     assert lv_["target2"] == pytest.approx(105.0 * 0.9995)
-    assert lv_["stop"] == pytest.approx(97.0 * 0.9995)       # 저점 −여유(바깥)
-    assert lv_["rr"] == pytest.approx((101.949 - 100) / (100 - 96.9515))
 
 
-def test_levels_missing_side_is_none():
-    lv_ = lv.compute_levels(_short_bars(), "short", 104.0, k=3, pad_pct=0.05)
-    assert lv_["stop"] is None and lv_["rr"] is None        # 진입가 위 스윙 고점 없음
-    assert lv_["target1"] == pytest.approx(98.0 * 1.0005)
+def test_liquidation_price():
+    assert lv.liquidation_price("long", 100.0) == pytest.approx(91.0)
+    assert lv.liquidation_price("short", 100.0) == pytest.approx(109.0)
 
 
 # ── 이치모쿠 (작은 파라미터로 수작업 대조) ──
@@ -188,7 +183,7 @@ def test_build_context_records_reasons():
     assert lv.price_basis() == "현물"
 
 
-# ── v2.40 최소 거리·구간 극값 ──
+# ── v2.40 최소 거리·구간 극값 (v2.41: 목표만) ──
 
 # 스윙 저점 99.9(idx3)·99.0(idx7)·98.0(idx11), 스윙 고점 100.6(idx9).
 # 양 끝(0~2, 13~15)은 스윙 후보가 아님 — 최고가 100.7(idx14), 최저가 97.0(idx15)
@@ -201,25 +196,17 @@ def test_swing_closer_than_min_dist_skipped():
     # 99.9 스윙 → 99.95(0.05%) 건너뜀 → 다음 스윙들
     assert lv_["target1"] == pytest.approx(99.0 * 1.0005)
     assert lv_["target2"] == pytest.approx(98.0 * 1.0005)
-    assert lv_["stop"] == pytest.approx(100.6 * 1.0005)
-    assert lv_["src"] == {"target1": "swing", "target2": "swing", "stop": "swing"}
+    assert lv_["src"] == {"target1": "swing", "target2": "swing"}
     # 최소 거리 0이면(옛 동작) 99.9 스윙이 목표1
     assert lv.compute_levels(MIN_BARS, "short", 100.0, k=3, pad_pct=0.05,
                              min_dist_pct=0)["target1"] == pytest.approx(99.9 * 1.0005)
 
 
-def test_stop_falls_back_to_window_extreme():
-    # 진입 100.55: 스윙 고점 100.6 → 100.65(0.10%) 건너뜀 → 최고가 100.7 +0.1%
-    lv_ = lv.compute_levels(MIN_BARS, "short", 100.55, k=3, pad_pct=0.05,
-                            min_dist_pct=0.15, extreme_pad_pct=0.1)
-    assert lv_["stop"] == pytest.approx(100.7 * 1.001)
-    assert lv_["src"]["stop"] == "extreme"
-
-
 def test_extreme_also_too_close_is_none():
-    lv_ = lv.compute_levels(MIN_BARS, "short", 100.69, k=3, pad_pct=0.05,
+    # 진입 97.2 숏: 진입가 아래 스윙 없음 → 최저가 97.0 +0.1% = 97.097(0.106%) < 0.15% → 없음
+    lv_ = lv.compute_levels(MIN_BARS, "short", 97.2, k=3, pad_pct=0.05,
                             min_dist_pct=0.15, extreme_pad_pct=0.1)
-    assert lv_["stop"] is None and lv_["rr"] is None
+    assert lv_["target1"] is None and lv_["target2"] is None
 
 
 def test_target2_falls_back_to_window_extreme():
@@ -235,4 +222,3 @@ def test_long_min_dist_mirror():
     bars = [B(200 - b["l"], 200 - b["h"]) for b in MIN_BARS]
     lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)
     assert lv_["target1"] == pytest.approx(101.0 * 0.9995)   # 100.1 스윙(0.05%) 건너뜀
-    assert lv_["stop"] == pytest.approx(99.4 * 0.9995)
