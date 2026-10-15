@@ -128,3 +128,61 @@ def test_htf_rsi_direction():
 
 def test_parse_targets():
     assert lv._parse_targets("btcusdt:5m, ETHUSDT:1m,bad,") == [("BTCUSDT", "5m"), ("ETHUSDT", "1m")]
+
+
+# ── v2.39 봉 조회 호스트 폴백 (Railway 미국 리전 451) ──
+
+import requests  # noqa: E402
+
+ROW = [1, "1", "2", "0.5", "1.5", "0", 59_999, "0", 0, "0", "0", "0"]
+
+
+def _resp(code, body=None):
+    r = requests.Response()
+    r.status_code = code
+    r._content = (b"[]" if body is None else body)
+    r.url = "http://x"
+    return r
+
+
+def test_fetch_451_falls_back_without_retry(monkeypatch):
+    calls = []
+
+    def get(url, params=None, timeout=None):
+        calls.append(url)
+        return _resp(451) if "binance.vision" in url else _resp(200, ("[" + str(ROW).replace("'", '"') + "]").encode())
+
+    monkeypatch.setattr(lv.requests, "get", get)
+    bars = lv.fetch_klines("BTCUSDT", "1m", limit=1500)
+    assert calls == ["https://data-api.binance.vision/api/v3/klines", "https://api.binance.com/api/v3/klines"]
+    assert bars[0]["c"] == 1.5
+
+
+def test_fetch_all_hosts_fail_reason(monkeypatch):
+    calls = []
+    monkeypatch.setattr(lv.requests, "get", lambda url, **kw: calls.append(url) or _resp(451))
+    with pytest.raises(lv.KlinesError) as ei:
+        lv.fetch_klines("BTCUSDT", "5m")
+    assert len(calls) == 2   # 호스트당 1회, 재시도 없음
+    assert str(ei.value) == "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
+
+
+def test_fetch_network_error_falls_back(monkeypatch):
+    def get(url, params=None, timeout=None):
+        if "binance.vision" in url:
+            raise requests.ConnectionError("boom")
+        assert params["limit"] == 1000   # 현물 최대 1000으로 제한
+        return _resp(200)
+
+    monkeypatch.setattr(lv.requests, "get", get)
+    assert lv.fetch_klines("BTCUSDT", "1m", limit=1500) == []
+
+
+def test_build_context_records_reasons():
+    def fetch(*a, **kw):
+        raise lv.KlinesError("HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)")
+
+    ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 100.0, 59_999, fetch=fetch)
+    assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
+                             for k in ("levels", "cloud", "htf_rsi")}
+    assert lv.price_basis() == "현물"

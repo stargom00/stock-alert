@@ -112,7 +112,30 @@ def test_signal_message_format():
         "30m 구름: 위, 두께 1.5% → 숏 역",
         "2h RSI 38 ↓",
         "신호ID #0042",
+        "가격 기준: 현물",
     ]
+
+
+def test_ingest_klines_451_reason_in_message(tmp_path):
+    """v2.39 #0001 사고: 봉 조회 전부 451 → "없음/계산 실패" 대신 사유 한 줄."""
+    def fetch_451(*a, **kw):
+        raise lv.KlinesError("HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)")
+
+    sent = []
+    sig = tr.ingest_signal("BTCUSDT", "1m", "long", 80855.7, utc_ms(2026, 10, 15, 10, 47),
+                           "webhook", sent.append, fetch_451, str(tmp_path / "s.json"))
+    assert set(sig["errors"]) == {"levels", "cloud", "htf_rsi"}
+    lines = sent[0].split("\n")
+    assert lines[2:] == [
+        "목표/손절 —",
+        "30m 구름 —",
+        "2h RSI —",
+        "⚠️ 목표/손절·30m 구름·2h RSI 조회 실패: "
+        "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
+        "신호ID #0001",
+        "가격 기준: 현물",
+    ]
+    assert "없음" not in sent[0] and "계산 실패" not in sent[0]
 
 
 # ── 수신·중복 ──

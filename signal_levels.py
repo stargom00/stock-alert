@@ -1,6 +1,7 @@
 """코인 선물 RSI 신호 — 지표·목표/손절·상위 주기 맥락 계산 (v2.37).
 
-바이낸스 USDⓈ-M 선물 공개 API(fapi.binance.com, 키 불필요)에서 봉만 읽는다.
+바이낸스 공개 klines(키 불필요)에서 봉만 읽는다. v2.39부터 기본은 현물
+data-api.binance.vision(Railway 미국 리전에서 fapi는 451), COIN_KLINES_BASE로 변경.
 주문 기능은 없고 넣지 않는다.
 
 봉(bar)은 dict: {"t": 시작 ms, "T": 마감 ms, "o","h","l","c": float}.
@@ -88,25 +89,63 @@ TF_MS = {
     "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000,
 }
 
-BINANCE_FAPI = "https://fapi.binance.com/fapi/v1/klines"
+# v2.39: Railway(미국 리전) IP는 fapi.binance.com이 전부 451(지역 차단) — 기본을
+# 지역 제한 없는 현물 공개 데이터로. 현물/선물 차이는 수십 달러라 스윙 자리엔 영향 없음.
+KLINES_BASE = os.environ.get("COIN_KLINES_BASE", "https://data-api.binance.vision/api/v3/klines")
+KLINES_FALLBACK = "https://api.binance.com/api/v3/klines"
+SPOT_MAX_LIMIT = 1000   # 현물 klines 최대 1000 (선물 1500)
+
+
+def klines_hosts():
+    """조회 순서: 설정 호스트 1회 → 폴백 1회. 같은 주소면 한 번만."""
+    return [KLINES_BASE] + ([KLINES_FALLBACK] if KLINES_FALLBACK != KLINES_BASE else [])
+
+
+def price_basis():
+    """메시지 하단 표기용. /fapi/ 경로면 선물, 아니면 현물."""
+    return "선물" if "/fapi/" in KLINES_BASE else "현물"
+
+
+class KlinesError(Exception):
+    """모든 호스트 실패. str()은 메시지용 짧은 사유(HTTP 코드 + 호스트)."""
+
+
+def _host(url):
+    return url.split("//", 1)[-1].split("/", 1)[0]
+
+
+def _fail_reason(url, e):
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None):
+        return f"HTTP {resp.status_code} ({_host(url)})"
+    return f"{type(e).__name__} ({_host(url)})"
 
 
 def parse_kline_rows(rows):
-    """바이낸스 klines 응답 배열 → 봉 dict 리스트."""
+    """바이낸스 klines 응답 배열 → 봉 dict 리스트 (현물·선물 형식 동일)."""
     return [{"t": int(r[0]), "o": float(r[1]), "h": float(r[2]), "l": float(r[3]),
              "c": float(r[4]), "T": int(r[6])} for r in rows]
 
 
 def fetch_klines(symbol, tf, limit=500, end_ms=None, start_ms=None):
-    """공개 klines 조회. 실패하면 예외 — 호출부에서 처리."""
-    params = {"symbol": symbol, "interval": tf, "limit": min(int(limit), 1500)}
+    """공개 klines 조회. 호스트마다 정확히 1회 — 451 등 실패는 재시도 없이
+    바로 다음 호스트로(같은 IP면 계속 451이라 재시도 무의미). 전부 실패하면
+    KlinesError("HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)")."""
+    params = {"symbol": symbol, "interval": tf, "limit": min(int(limit), SPOT_MAX_LIMIT)}
     if end_ms is not None:
         params["endTime"] = int(end_ms)
     if start_ms is not None:
         params["startTime"] = int(start_ms)
-    r = requests.get(BINANCE_FAPI, params=params, timeout=10)
-    r.raise_for_status()
-    return parse_kline_rows(r.json())
+    reasons = []
+    for url in klines_hosts():
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            return parse_kline_rows(r.json())
+        except Exception as e:
+            reasons.append(_fail_reason(url, e))
+            print(f"[코인봉] {symbol} {tf} {reasons[-1]}")
+    raise KlinesError(" → ".join(reasons))
 
 
 def dedup_bars(tf):
@@ -269,25 +308,31 @@ def htf_rsi(bars, length=None):
     return {"value": r[-1], "dir": arrow}
 
 
+def _err_text(e):
+    if isinstance(e, KlinesError):
+        return str(e)
+    return f"{type(e).__name__}: {e}"[:80]
+
+
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게)."""
     out = {"target1": None, "target2": None, "stop": None, "rr": None,
-           "cloud": None, "htf_rsi": None, "errors": []}
+           "cloud": None, "htf_rsi": None, "errors": {}}   # {"levels"|"cloud"|"htf_rsi": 사유}
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
         bars = [b for b in bars if b["T"] <= bar_close_ms]   # 신호 봉까지만
         out.update(compute_levels(bars, side, entry))
     except Exception as e:
-        out["errors"].append(f"levels: {e}")
+        out["errors"]["levels"] = _err_text(e)
     try:
         cb = fetch(symbol, CONFIG["CLOUD_TF"], limit=120, end_ms=bar_close_ms)
         out["cloud"] = cloud_context(entry, ichimoku_cloud(cb), side)
     except Exception as e:
-        out["errors"].append(f"cloud: {e}")
+        out["errors"]["cloud"] = _err_text(e)
     try:
         hb = fetch(symbol, CONFIG["HTF_RSI_TF"], limit=300, end_ms=bar_close_ms)
         out["htf_rsi"] = htf_rsi(hb)
     except Exception as e:
-        out["errors"].append(f"htf_rsi: {e}")
+        out["errors"]["htf_rsi"] = _err_text(e)
     return out

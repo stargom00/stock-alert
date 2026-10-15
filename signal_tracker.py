@@ -10,7 +10,7 @@
   daily_summary(): 매일 09:00 NZ.
 
 저장: $DATA_DIR/coin_signals.json (기존 sent_log.json과 같은 DATA_DIR 규칙).
-바이낸스 공개 API만 읽는다. 주문 기능 없음.
+바이낸스 공개 klines만 읽는다(기본 현물 data-api.binance.vision, v2.39). 주문 기능 없음.
 """
 import json
 import os
@@ -115,30 +115,43 @@ def format_signal_message(sig):
     head = "🔺" if sig["side"] == "long" else "🔻"
     rr = sig.get("rr")
     rr_warn = rr is not None and rr < 1
+    errs = sig.get("errors") or {}
     lines = [f"{head} {sig['symbol']} {sig['tf']} {side_ko} 신호 {fmt_signal_time(sig['bar_close_ms'])}",
              f"진입 참고 {fmt_px(entry)}"]
-    for key, label in (("target1", "목표1"), ("target2", "목표2"), ("stop", "손절")):
-        v = sig.get(key)
-        if v is None:
-            lines.append(f"{label} 없음")
-            continue
-        line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
-        if key == "target1" and rr_warn:
-            line += " ⚠️"
-        lines.append(line)
-    lines.append(f"손익비 {rr:.1f}" + (" ⚠️" if rr_warn else "") if rr is not None else "손익비 —")
+    if "levels" in errs:
+        lines.append("목표/손절 —")   # 조회 실패를 "없음"(스윙 0개)과 구분
+    else:
+        for key, label in (("target1", "목표1"), ("target2", "목표2"), ("stop", "손절")):
+            v = sig.get(key)
+            if v is None:
+                lines.append(f"{label} 없음")
+                continue
+            line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
+            if key == "target1" and rr_warn:
+                line += " ⚠️"
+            lines.append(line)
+        lines.append(f"손익비 {rr:.1f}" + (" ⚠️" if rr_warn else "") if rr is not None else "손익비 —")
     c = sig.get("cloud")
     if c:
         tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
         lines.append(f"{CONFIG['CLOUD_TF']} 구름: {_POS_KO[c['pos']]}, 두께 {c['thick_pct']:.1f}% → {tail}")
     else:
-        lines.append(f"{CONFIG['CLOUD_TF']} 구름: 계산 실패")
+        lines.append(f"{CONFIG['CLOUD_TF']} 구름 —")
     h = sig.get("htf_rsi")
     if h:
         lines.append(f"{CONFIG['HTF_RSI_TF']} RSI {h['value']:.0f} {h['dir']}")
     else:
-        lines.append(f"{CONFIG['HTF_RSI_TF']} RSI 계산 실패")
+        lines.append(f"{CONFIG['HTF_RSI_TF']} RSI —")
+    # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
+    labels = {"levels": "목표/손절", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI"}
+    by_reason = {}
+    for k in ("levels", "cloud", "htf_rsi"):
+        if k in errs:
+            by_reason.setdefault(errs[k], []).append(labels[k])
+    for reason, what in by_reason.items():
+        lines.append(f"⚠️ {'·'.join(what)} 조회 실패: {reason}")
     lines.append(f"신호ID #{sig['id']:04d}")
+    lines.append(f"가격 기준: {sig.get('price_basis') or lv.price_basis()}")
     return "\n".join(lines)
 
 
@@ -164,8 +177,8 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             print(f"[코인신호] 중복 무시 {symbol} {tf} {side} {bar_open_ms} ({source})")
             return None
     ctx = lv.build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch)
-    for e in ctx["errors"]:
-        print(f"[코인신호] {symbol} {tf} 계산 일부 실패: {e}")
+    for k, e in ctx["errors"].items():
+        print(f"[코인신호] {symbol} {tf} {k} 실패: {e}")
     with _lock:
         signals = load_signals(path)
         if is_duplicate(signals, symbol, tf, side, bar_open_ms):
@@ -182,6 +195,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
             "source": source,
+            "errors": ctx["errors"], "price_basis": lv.price_basis(),
             # 추적 상태
             "status": "open", "phase": "pre_t1", "result": None,
             "checked_until_ms": bar_close_ms, "bars": 0,
@@ -424,7 +438,7 @@ def track_open_signals(send, fetch=lv.fetch_klines, path=None, now_ms=None):
     for sym, sigs in by_sym.items():
         start = min(s["checked_until_ms"] for s in sigs) + 1
         try:
-            fetched[sym] = fetch(sym, "1m", limit=1500, start_ms=start)
+            fetched[sym] = fetch(sym, "1m", limit=lv.SPOT_MAX_LIMIT, start_ms=start)
         except Exception as e:
             print(f"[코인추적] {sym} 1m 조회 실패: {e}")
     with _lock:
