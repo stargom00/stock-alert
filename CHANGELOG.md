@@ -2,6 +2,30 @@
 
 v2.30 이전 이력은 git log 커밋 메시지 참고.
 
+## v2.37 — 코인 선물 RSI 신호 알림 + 추적 (2026-10-15)
+- 용어: ①RSI봉(RSI(14) 30 밑/70 위 마감) → ②확인봉(양봉/음봉 마감, 신호 확정)
+  → ③진입봉. 진입 참고가 = ②확인봉 종가, 알림 시각 = ②확인봉 마감.
+- 신규 `signal_levels.py`: Wilder RSI(트레이딩뷰 ta.rsi 방식), 스윙 고저점(양옆
+  K봉, 양 끝 제외), 목표1/2·손절(여유 %), 손익비(<1 ⚠️), 30m 이치모쿠 구름
+  (9/26/52, 트레이딩뷰처럼 25봉 이동) 위치·두께·편/역, 2h RSI. 상수는 `CONFIG`.
+- 신규 `signal_tracker.py`: 자체 판정(바이낸스 fapi 공개 klines, 기본 BTCUSDT 5m),
+  Webhook 큐 처리, N봉(12) 중복 제거(저장된 신호 기준 — 재시작·두 경로 중복도
+  차단), `$DATA_DIR/coin_signals.json` 저장, 1분마다 1m 봉으로 목표/손절 추적
+  (같은 봉 동시 도달 = 손절, 목표1 후 목표2 승격, 24시간 만료), MFE/MAE,
+  매일 09:00 NZ 7일/30일 요약(손익비≥1·구름 편/역 분해).
+- 신규 `coin_http.py`: `POST /tv-webhook`(토큰: `X-TV-Token` 헤더 또는 `?token=`
+  — 트레이딩뷰는 커스텀 헤더 불가), `GET /api/coin-signals`(읽기 전용),
+  `GET /health`. 표준 라이브러리 서버, 데몬 스레드, `$PORT`.
+- `main.py`: 스케줄 등록 2줄만 추가. 기존 알림 로직 변경 없음. 주문 기능 없음.
+- 환경변수: `COIN_WEBHOOK_TOKEN`(필수, 미설정 시 Webhook 전부 401),
+  `COIN_CHAT_ID`, `COIN_API_READ_TOKEN`, `COIN_SELF_ENABLED`, `COIN_SELF_TARGETS`,
+  `COIN_WEBHOOK_ENABLED`, `COIN_HTTP_ENABLED`, `COIN_DEDUP_BARS`, `COIN_SWING_K`,
+  `COIN_LEVEL_PAD_PCT`, `COIN_LEVEL_LOOKBACK`, `COIN_RSI_*`, `COIN_CLOUD_TF`,
+  `COIN_HTF_RSI_TF`, `COIN_EXPIRE_HOURS`, `COIN_SUMMARY_TIME`.
+- 테스트: `test_signal_levels.py`, `test_signal_tracker.py`, `test_coin_http.py`,
+  실데이터 `fixtures/btcusdt_5m_20261015_0830utc.json`. 10-15 08:00 UTC TV 숏
+  알람은 바이낸스 5m 종가 기준 ①RSI 67.72라 재현 안 됨 → xfail로 기록.
+
 ## v2.35 — 매크로에 S&P500 선물 추가, 나스닥 라벨 복원 (2026-10-01)
 - `ES=F`(라벨 `S&P 선물`)를 나스닥 줄 바로 아래 추가. 등락 % 표기(일반 종목과 동일).
   `&`는 본문에서 `&amp;`로 이스케이프, 정렬 폭은 원문 기준.

@@ -2542,6 +2542,8 @@ schedule.every().day.at("14:48", "Asia/Seoul").do(check_jongga)  # v2.18 종가�
 schedule.every().day.at("09:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 토스 동기화 IP 실패 감시
 schedule.every().day.at("21:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 (하루 2회)
 register_macro_schedule(schedule)  # v2.31 매크로 아침 요약 (MACRO_TIME KST, 주말 포함)
+import signal_tracker  # v2.37 코인 선물 RSI 신호 (자체 판정·Webhook·추적·09:00 NZ 요약, HTTP :$PORT)
+signal_tracker.register(schedule, send_telegram)
 
 check_alerts()
 
