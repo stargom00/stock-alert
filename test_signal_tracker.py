@@ -137,6 +137,23 @@ def test_ingest_dedup_n_bars(tmp_path):
     assert saved[0]["status"] == "open" and saved[0]["target1"] is None
 
 
+def test_dedup_per_timeframe(tmp_path):
+    assert lv.dedup_bars("5m") == 12 and lv.dedup_bars("1m") == 30
+    p = str(tmp_path / "s.json")
+    sent = []
+    t0 = utc_ms(2026, 10, 15, 8, 0)
+    ing = lambda t: tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, t, "self", sent.append, _fake_fetch_levels, p)
+    assert ing(t0)["id"] == 1
+    assert ing(t0 + 29 * MIN) is None        # 1m은 30봉 안이면 중복
+    assert ing(t0 + 30 * MIN)["id"] == 2
+
+
+def test_parse_dedup():
+    assert lv._parse_dedup("5m:12,1m:30") == {"*": 12, "5m": 12, "1m": 30}
+    assert lv._parse_dedup("20") == {"*": 20}
+    assert lv._parse_dedup("5m:x,1m:30") == {"*": 12, "1m": 30}
+
+
 # ── 실데이터 재생 (바이낸스 BTCUSDT 5m, 10-11 21:15 ~ 10-15 08:30 UTC) ──
 
 def _fixture_bars():
@@ -157,12 +174,13 @@ def _replay(now_ms):
     sent, got = [], []
     tr._self_next_due.clear()
     tr._self_last_bar.clear()
-    orig = tr.ingest_signal
+    orig, orig_targets = tr.ingest_signal, tr.CONFIG["SELF_TARGETS"]
     try:
         tr.ingest_signal = lambda *a, **kw: got.append(a[:5])
+        tr.CONFIG["SELF_TARGETS"] = [("BTCUSDT", "5m")]   # 픽스처는 5m만
         tr.self_detect(sent.append, fetch=fetch, now_ms=now_ms)
     finally:
-        tr.ingest_signal = orig
+        tr.ingest_signal, tr.CONFIG["SELF_TARGETS"] = orig, orig_targets
     return got
 
 
@@ -177,8 +195,8 @@ def test_replay_self_detect_1014_0815_short():
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "사용자 보고 TV 알람 10-15 08:00 UTC 숏: 바이낸스 5m 종가 기준 ①RSI봉(07:55) RSI 67.72 "
-    "(고가 기준이라도 68.8) < 70이라 자체 판정 B는 신호 없음. TV 알람의 주기/시각 확인 필요"))
+    "사용자가 1m 신호(② 08:02 UTC)를 5m로 오인한 케이스, 봇 판정이 맞음 — "
+    "5m ①RSI봉(07:55) RSI 67.72 < 70이라 5m 신호 없음"))
 def test_replay_self_detect_1015_0800_tv_alarm():
     got = _replay(utc_ms(2026, 10, 15, 8, 0, 3))
     assert got and got[0][2] == "short"

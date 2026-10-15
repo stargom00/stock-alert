@@ -148,7 +148,7 @@ def is_duplicate(signals, symbol, tf, side, bar_open_ms, n_bars=None):
     """같은 심볼·주기·방향의 저장된(=발송된) 신호와 N봉 이내면 중복.
     저장된 신호 기준이라 재시작 후에도 유지되고, Webhook과 자체 판정이 같은
     봉을 둘 다 내도 하나만 나간다."""
-    n_bars = CONFIG["DEDUP_BARS"] if n_bars is None else n_bars
+    n_bars = lv.dedup_bars(tf) if n_bars is None else n_bars
     span = n_bars * TF_MS[tf]
     return any(s["symbol"] == symbol and s["tf"] == tf and s["side"] == side
                and abs(bar_open_ms - s["bar_open_ms"]) < span for s in signals)

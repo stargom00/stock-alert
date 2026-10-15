@@ -39,16 +39,33 @@ def _parse_targets(raw):
     return out
 
 
+def _parse_dedup(raw, default=12):
+    """"5m:12,1m:30" → {"5m": 12, "1m": 30}. 숫자 하나("12")면 모든 주기에 적용
+    ("*" 키). 형식 오류 항목은 무시."""
+    out = {"*": default}
+    for part in (raw or "").split(","):
+        tf, sep, n = part.strip().partition(":")
+        try:
+            if sep:
+                out[tf.strip()] = int(n)
+            elif tf:
+                out["*"] = int(tf)
+        except ValueError:
+            continue
+    return out
+
+
 # 모든 상수는 여기 한 곳. Railway 환경변수로 덮어쓸 수 있다.
 CONFIG = {
     # 신호 규칙
     "RSI_LEN": _env_int("COIN_RSI_LEN", "14"),
     "RSI_LOW": _env_float("COIN_RSI_LOW", "30"),     # 직전 봉 RSI < 이 값 → 다음 양봉에 롱
     "RSI_HIGH": _env_float("COIN_RSI_HIGH", "70"),   # 직전 봉 RSI > 이 값 → 다음 음봉에 숏
-    "DEDUP_BARS": _env_int("COIN_DEDUP_BARS", "12"),  # 같은 심볼·주기·방향 N봉 안 재신호는 무시
+    # 같은 심볼·주기·방향 N봉 안 재신호는 무시. 주기별(1m은 신호가 잦아 30봉), 목록에 없는 주기는 "*"
+    "DEDUP_BARS": _parse_dedup(os.environ.get("COIN_DEDUP_BARS", "5m:12,1m:30")),
     # 신호 경로
     "SELF_ENABLED": _env_bool("COIN_SELF_ENABLED", "1"),        # B. 자체 판정
-    "SELF_TARGETS": _parse_targets(os.environ.get("COIN_SELF_TARGETS", "BTCUSDT:5m")),  # 1m은 기본 off
+    "SELF_TARGETS": _parse_targets(os.environ.get("COIN_SELF_TARGETS", "BTCUSDT:5m,BTCUSDT:1m")),  # 실매매가 1m 신호로 들어감
     "WEBHOOK_ENABLED": _env_bool("COIN_WEBHOOK_ENABLED", "1"),  # A. 트레이딩뷰 Webhook
     # 목표/손절
     "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙
@@ -90,6 +107,11 @@ def fetch_klines(symbol, tf, limit=500, end_ms=None, start_ms=None):
     r = requests.get(BINANCE_FAPI, params=params, timeout=10)
     r.raise_for_status()
     return parse_kline_rows(r.json())
+
+
+def dedup_bars(tf):
+    d = CONFIG["DEDUP_BARS"]
+    return d.get(tf, d.get("*", 12))
 
 
 def closed_only(bars, now_ms):
