@@ -132,6 +132,23 @@ def pullback_line(sig):
             f"{fmt_px(sig['ref_extreme'])} 대비 {fmt_pct(shown)})")
 
 
+def tp_line(sig):
+    """v2.44 목표 +0.5% → 82,460 (20배 ROI +10%)"""
+    pct = sig["tp_pct"]
+    sign = "+" if sig["side"] == "long" else "−"
+    return (f"목표 {sign}{pct:g}% → {fmt_px(sig['tp'])} "
+            f"({CONFIG['TP_ROI_LEV']:g}배 ROI +{round(pct * CONFIG['TP_ROI_LEV'], 2):g}%)")
+
+
+def ref_line(sig):
+    """v2.44 참고 1m 직전 고점(롱)/저점(숏) — 목표 아님."""
+    what = "고점" if sig["side"] == "long" else "저점"
+    v = sig.get("ref_swing")
+    if v is None:
+        return f"참고 1m 직전 {what} 없음"
+    return f"참고 1m 직전 {what} {fmt_px(v)} ({fmt_pct(_pct_from(sig['entry'], v))})"
+
+
 def format_signal_message(sig):
     entry = sig["entry"]
     side_ko = _SIDE_KO[sig["side"]]
@@ -139,21 +156,9 @@ def format_signal_message(sig):
     errs = sig.get("errors") or {}
     lines = [f"{head} {sig['symbol']} {sig['tf']} {side_ko} 신호 {fmt_signal_time(sig['bar_close_ms'])}",
              f"진입 참고 {fmt_px(entry)}"]
-    if "levels" in errs:
-        lines.append("목표 —")   # 조회 실패를 "없음"(스윙 0개)과 구분
-    else:
-        for key, label in (("target1", "목표1"), ("target2", "목표2")):
-            v = sig.get(key)
-            if v is None:
-                lines.append(f"{label} 없음")
-                continue
-            line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
-            src = (sig.get("level_src") or {}).get(key)
-            if src == "extreme":
-                line += " 구간 극값"
-            elif src == "gap_fix":
-                line += " (간격 보정)"
-            lines.append(line)
+    lines.append(tp_line(sig))
+    if "ref" not in errs:
+        lines.append(ref_line(sig))
     # v2.41: 손절·손익비 대신 청산가 참고(채널 방식 — 강제청산 리스크만 관리)
     liq = lv.liquidation_price(sig["side"], entry)
     lines.append(f"청산가(10배 격리): {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})")
@@ -172,10 +177,10 @@ def format_signal_message(sig):
     if pb_line:
         lines.append(pb_line)
     # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
-    labels = {"levels": "목표", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI",
-              "pullback": "되돌림"}
+    labels = {"bar": "확인봉", "ref": "1m 참고", "cloud": f"{CONFIG['CLOUD_TF']} 구름",
+              "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI", "pullback": "되돌림"}
     by_reason = {}
-    for k in ("levels", "cloud", "htf_rsi", "pullback"):
+    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback"):
         if k in errs:
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
@@ -201,11 +206,12 @@ def is_duplicate(signals, symbol, tf, side, bar_open_ms, n_bars=None):
                and abs(bar_open_ms - s["bar_open_ms"]) < span for s in signals)
 
 
-def suppress_reason(entry, target1):
-    """알림 억제 사유(없으면 None). v2.41: 목표1 거리 기준만(손익비 기준 삭제).
-    목표1이 없으면 판정하지 않음."""
-    if target1 is not None and abs(target1 - entry) / entry * 100.0 < CONFIG["SUPPRESS_MIN_T1_PCT"]:
-        return f"목표1 거리 < {CONFIG['SUPPRESS_MIN_T1_PCT']:g}%"
+def suppress_reason(confirm_range_pct):
+    """알림 억제 사유(없으면 None). v2.44: ② 확인봉 변동폭(고가−저가)/시가가
+    STILL_BAR_PCT 미만이면 "미동 확인봉". 봉을 못 받았으면 판정하지 않음.
+    (v2.41 목표1 거리 억제는 고정 TP라 삭제)"""
+    if confirm_range_pct is not None and confirm_range_pct < CONFIG["STILL_BAR_PCT"]:
+        return "미동 확인봉"
     return None
 
 
@@ -257,7 +263,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         signals = load_signals(path)
         if is_duplicate(signals, symbol, tf, side, bar_open_ms):
             return None
-        sup = suppress_reason(entry, ctx["target1"])
+        sup = suppress_reason(ctx.get("confirm_range_pct"))
         dup_of = cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms)
         ref = cross_tf_confirm(signals, symbol, tf, side, bar_close_ms) if dup_of is None else None
         sig = {
@@ -266,7 +272,9 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "received_ms": now_ms if now_ms is not None else int(time.time() * 1000),
             "bar_open_ms": bar_open_ms, "bar_close_ms": bar_close_ms,
             "symbol": symbol, "tf": tf, "side": side, "entry": entry,
-            "target1": ctx["target1"], "target2": ctx["target2"],
+            "tp": ctx["tp"], "tp_pct": ctx["tp_pct"],              # v2.44 고정 TP
+            "ref_swing": ctx.get("ref_swing"),                     # 참고 1m 직전 고점/저점
+            "confirm_range_pct": ctx.get("confirm_range_pct"),     # ② 확인봉 변동폭 %
             "cloud": ({k: ctx["cloud"][k] for k in ("pos", "thick_pct", "bias")}
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
@@ -278,7 +286,6 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "entry_spot": ctx.get("entry_spot"),
             "source": source,
             "errors": ctx["errors"], "price_basis": lv.price_basis(),
-            "level_src": ctx.get("src") or {},
             # v2.40: 억제·교차 중복은 발송만 안 하고 저장·추적은 그대로
             "suppressed": sup is not None, "suppress_reason": sup,
             "duplicate": dup_of is not None, "dup_of": dup_of,
@@ -286,12 +293,11 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "opposite_of": None, "position_id": None, "position_action": None, "position_note": None,
             "confirm_of": None, "confirm_note": None,
             # 추적 상태
-            "status": "open", "phase": "pre_t1", "result": None,
+            "status": "open", "result": None,
             "checked_until_ms": bar_close_ms, "bars": 0,
             "max_high": None, "min_low": None, "last_close": None,
             "mfe_pct": 0.0, "mae_pct": 0.0,
-            "t1_hit_ms": None, "t1_bars": None,
-            "result_ms": None, "result_bars": None, "result_pct": None, "after_t1": None,
+            "result_ms": None, "result_bars": None, "result_pct": None,
         }
         pre_msgs = []
         pos_msgs = []
@@ -303,7 +309,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             if ref is not None:
                 sig["confirm_of"] = ref["id"]
                 sig["confirm_note"] = f"{ref['tf']} #{ref['id']:04d} → {tf} 확인" + \
-                    (" (목표 상향)" if action == "confirm" else "")
+                    (f" (포지션 #P{pid} 유지)" if action == "confirm" else "")   # v2.44 고정 TP라 목표 갱신 없음
                 if action == "confirm":
                     sig["position_note"] = None      # 확인 줄이 포지션 줄을 대신함
             if action == "opposite":
@@ -454,26 +460,23 @@ def _fav_pct(sig, price):
     return p if sig["side"] == "long" else -p
 
 
+def sig_tp(sig):
+    """v2.44 이전 신호(목표1/2)는 목표1을 TP로 봄."""
+    return sig.get("tp", sig.get("target1"))
+
+
 def update_signal(sig, bars, now_ms):
-    """신호 단위 기록(v2.41부터 텔레그램 발송 없음 — 포지션 이벤트가 대신함.
-    억제·중복 신호의 "실제로 어땠는지"를 남기려고 유지). 마감된 1m 봉으로 sig
-    갱신(제자리 수정), 로그용 한 줄 리스트 반환. 손절 없음: 목표1 → (목표2
-    승격) / EXPIRE_HOURS 만료."""
+    """신호 단위 기록(텔레그램 발송 없음 — 포지션 이벤트가 대신함. 억제·중복
+    신호의 "실제로 어땠는지"와 요약 통계용). 마감된 1m 봉으로 sig 갱신(제자리
+    수정), 로그용 한 줄 리스트 반환. v2.44: 단일 TP 도달 / EXPIRE_HOURS 만료.
+    MAE·MFE는 TP 도달 봉까지."""
     if sig["status"] != "open":
         return []
     msgs = []
     side = sig["side"]
-    t1, t2 = sig.get("target1"), sig.get("target2")
+    tp = sig_tp(sig)
     expire_ms = sig["bar_close_ms"] + 1 + int(CONFIG["EXPIRE_HOURS"] * 3_600_000)
     side_ko = _SIDE_KO[side]
-
-    def touched(level, b):
-        if level is None:
-            return False
-        return b["h"] >= level if side == "long" else b["l"] <= level
-
-    def finish():
-        sig["status"] = "done"
 
     for b in sorted(bars, key=lambda x: x["t"]):
         if b["T"] <= sig["checked_until_ms"] or b["T"] >= now_ms:
@@ -488,35 +491,19 @@ def update_signal(sig, bars, now_ms):
         sig["mae_pct"] = max(0.0, -_fav_pct(sig, worst))
         sig["checked_until_ms"] = b["T"]
         sig["last_close"] = b["c"]
-        hit_t1, hit_t2 = touched(t1, b), touched(t2, b)
-        mins = sig["bars"]
-        if sig["phase"] == "pre_t1" and hit_t1:
-            sig.update(t1_hit_ms=b["T"] + 1, t1_bars=mins)
-            if not hit_t2:
-                pct = _fav_pct(sig, t1)
-                sig.update(result="hit_target1", result_ms=b["T"] + 1, result_bars=mins,
-                           result_pct=pct, phase="post_t1")
-                msgs.append(f"#{sig['id']:04d} {side_ko} → 목표1 도달 ({fmt_pct(pct)}, {mins}분)")
-                if t2 is None:
-                    finish()
-                    break
-                continue
-        if sig["phase"] in ("pre_t1", "post_t1") and sig.get("t1_hit_ms") and hit_t2:
-            pct = _fav_pct(sig, t2)
-            sig.update(result="hit_target2", result_ms=b["T"] + 1, result_bars=mins, result_pct=pct)
-            msgs.append(f"#{sig['id']:04d} {side_ko} → 목표2 도달 ({fmt_pct(pct)}, {mins}분)")
-            finish()
+        if tp is not None and (b["h"] >= tp if side == "long" else b["l"] <= tp):
+            pct = _fav_pct(sig, tp)
+            sig.update(result="hit_tp", result_ms=b["T"] + 1, result_bars=sig["bars"], result_pct=pct,
+                       status="done")
+            msgs.append(f"#{sig['id']:04d} {side_ko} → TP ({fmt_pct(pct)}, {sig['bars']}분)")
             break
 
     if sig["status"] == "open" and sig["checked_until_ms"] + 1 >= expire_ms:
-        if sig["phase"] == "pre_t1":
-            pct = _fav_pct(sig, sig["last_close"]) if sig["last_close"] is not None else None
-            sig.update(result="expired", result_ms=expire_ms, result_bars=sig["bars"], result_pct=pct)
-            msgs.append(f"#{sig['id']:04d} {side_ko} → 만료 {CONFIG['EXPIRE_HOURS']:g}시간 미도달 "
-                        f"(종가 {fmt_pct(pct)})")
-        else:
-            sig["after_t1"] = "expired"
-        finish()
+        pct = _fav_pct(sig, sig["last_close"]) if sig["last_close"] is not None else None
+        sig.update(result="expired", result_ms=expire_ms, result_bars=sig["bars"], result_pct=pct,
+                   status="done")
+        msgs.append(f"#{sig['id']:04d} {side_ko} → 만료 {CONFIG['EXPIRE_HOURS']:g}시간 미도달 "
+                    f"(종가 {fmt_pct(pct)})")
     return msgs
 
 
@@ -565,28 +552,45 @@ def signal_counts(signals, now_ms, days):
             "opposite": sum(1 for s in w if s.get("opposite_of"))}
 
 
-def pullback_stats(signals, now_ms, days):
-    """v2.43 발송 신호를 되돌림 ✓ / ⚠️로 나눠 신호 단위 결과 비교(기록 끝난 것만)."""
+def _is_tp(s):
+    return s.get("result") in ("hit_tp", "hit_target1", "hit_target2")   # v2.44 이전 기록은 목표1 = TP
+
+
+MAE_BUCKETS = (0.2, 0.5, 1.0, 3.0)
+
+
+def tp_stats(signals, now_ms, days):
+    """v2.44 발송 신호의 신호 단위 결과(기록 끝난 것): TP 도달률, 평균 도달 시간,
+    MAE 분포, 되돌림 ✓/⚠️별 도달률."""
     since = now_ms - days * 86_400_000
-    out = {}
-    for key, ok in (("ok", True), ("warn", False)):
-        w = [s for s in signals if s["bar_close_ms"] >= since and s.get("sent", True)
-             and s.get("pullback_ok") is ok and s.get("status") == "done"]
-        pcts = [s["result_pct"] for s in w if s.get("result_pct") is not None]
-        out[key] = {"n": len(w),
-                    "t1": sum(1 for s in w if s.get("t1_hit_ms")),
-                    "avg": sum(pcts) / len(pcts) if pcts else None,
-                    "mae": sum(s.get("mae_pct") or 0.0 for s in w) / len(w) if w else None}
-    return out
+    w = [s for s in signals if s["bar_close_ms"] >= since and s.get("sent", True) and s.get("status") == "done"]
+    hit = [s for s in w if _is_tp(s)]
+    times = [s["result_ms"] - (s["bar_close_ms"] + 1) for s in hit if s.get("result_ms")]
+    buckets = [0] * (len(MAE_BUCKETS) + 1)
+    for s in w:
+        m = s.get("mae_pct") or 0.0
+        buckets[next((i for i, lim in enumerate(MAE_BUCKETS) if m <= lim), len(MAE_BUCKETS))] += 1
+
+    def rate(ok):
+        g = [s for s in w if s.get("pullback_ok") is ok]
+        return sum(1 for s in g if _is_tp(s)), len(g)
+
+    return {"n": len(w), "hit": len(hit), "avg_ms": sum(times) / len(times) if times else None,
+            "mae_buckets": buckets, "pb_ok": rate(True), "pb_warn": rate(False)}
 
 
-def format_pullback_line(st):
-    def part(label, d):
-        if not d["n"]:
-            return f"{label} 0건"
-        return (f"{label} {d['n']}건: 목표1 {d['t1']}/{d['n']} · 평균 {fmt_pct(d['avg'])} · "
-                f"MAE {fmt_pct(-d['mae'])}")
-    return f"{part('되돌림 ✓', st['ok'])} | {part('⚠️', st['warn'])}"
+def _rate(a, n):
+    return f"{a}/{n} ({a / n * 100:.0f}%)" if n else "0/0"
+
+
+def format_tp_lines(st):
+    avg = cp.fmt_dur(st["avg_ms"]) if st["avg_ms"] is not None else "—"
+    lims = [f"≤{x:g}%" for x in MAE_BUCKETS] + [f">{MAE_BUCKETS[-1]:g}%"]
+    return [
+        f"신호→TP {_rate(st['hit'], st['n'])} · 평균 도달 {avg}",
+        f"MAE 분포: " + " · ".join(f"{l} {c}" for l, c in zip(lims, st["mae_buckets"])),
+        f"되돌림 ✓ TP {_rate(*st['pb_ok'])} | ⚠️ TP {_rate(*st['pb_warn'])}",
+    ]
 
 
 def format_summary(signals, positions, now_ms, windows=(7, 30)):
@@ -598,7 +602,7 @@ def format_summary(signals, positions, now_ms, windows=(7, 30)):
         c = signal_counts(signals, now_ms, days)
         lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
                      f"반대방향 보류 {c['opposite']}")
-        lines.append(format_pullback_line(pullback_stats(signals, now_ms, days)))
+        lines += format_tp_lines(tp_stats(signals, now_ms, days))
     return "\n".join(lines)
 
 

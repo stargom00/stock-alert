@@ -1,4 +1,4 @@
-"""코인 선물 RSI 신호 — 지표·목표/손절·상위 주기 맥락 계산 (v2.37).
+"""코인 선물 RSI 신호 — 지표·목표(v2.44 고정 TP)·상위 주기 맥락 계산 (v2.37).
 
 바이낸스 공개 klines(키 불필요)에서 봉만 읽는다. v2.39부터 기본은 현물
 data-api.binance.vision(Railway 미국 리전에서 fapi는 451), COIN_KLINES_BASE로 변경.
@@ -8,6 +8,7 @@ data-api.binance.vision(Railway 미국 리전에서 fapi는 451), COIN_KLINES_BA
 계산 함수는 전부 순수 함수(네트워크 없음)라 고정 배열로 테스트한다.
 """
 import os
+from datetime import datetime, timezone
 
 import requests
 
@@ -68,17 +69,16 @@ CONFIG = {
     "SELF_ENABLED": _env_bool("COIN_SELF_ENABLED", "1"),        # B. 자체 판정
     "SELF_TARGETS": _parse_targets(os.environ.get("COIN_SELF_TARGETS", "BTCUSDT:5m,BTCUSDT:1m")),  # 실매매가 1m 신호로 들어감
     "WEBHOOK_ENABLED": _env_bool("COIN_WEBHOOK_ENABLED", "1"),  # A. 트레이딩뷰 Webhook
-    # 목표/손절
-    "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙
-    "LEVEL_PAD_PCT": _env_float("COIN_LEVEL_PAD_PCT", "0.05"),  # 목표·손절 여유 %
+    # v2.44 목표 = 고정 TP(채널 방식). 스윙 목표1/2 계산 삭제
+    "TP_PCT": _env_float("COIN_TP_PCT", "0.5"),                  # 진입가 ± 이 %
+    "TP_WEEKEND_PCT": _env_float("COIN_TP_WEEKEND_PCT", "0.3"),  # 신호 시각이 UTC 토·일이면
+    "TP_ROI_LEV": _env_float("COIN_TP_ROI_LEV", "20"),           # 메시지 ROI 환산 배율
+    "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙 (참고 1m 직전 고점/저점)
     "LEVEL_LOOKBACK": _env_int("COIN_LEVEL_LOOKBACK", "200"),   # 스윙 탐색 봉 수
-    "MIN_LEVEL_DIST_PCT": _env_float("COIN_MIN_LEVEL_DIST_PCT", "0.15"),  # v2.40 진입가에서 이보다 가까운 목표·손절 스윙은 건너뜀
-    "EXTREME_PAD_PCT": _env_float("COIN_EXTREME_PAD_PCT", "0.1"),         # v2.40 스윙 없을 때 구간 극값 여유 %
-    "TARGET_GAP_PCT": _env_float("COIN_TARGET_GAP_PCT", "0.1"),           # v2.42 목표2는 목표1보다 이 % 이상 멀리
-    # v2.40 알림 억제(저장·추적은 함): 목표1 거리 < 이 값 % (v2.41: 손익비 기준 삭제)
-    "SUPPRESS_MIN_T1_PCT": _env_float("COIN_SUPPRESS_MIN_T1_PCT", "0.15"),
+    # v2.44 알림 억제(저장·추적은 함): ② 확인봉 (고가−저가)/시가 < 이 % → "미동 확인봉"
+    "STILL_BAR_PCT": _env_float("COIN_STILL_BAR_PCT", "0.02"),
     "CROSS_DUP_MIN": _env_float("COIN_CROSS_DUP_MIN", "10"),  # v2.40 다른 주기 같은 방향 발송 후 이 분 이내면 중복
-    # (v2.42: 짧은 주기 발송 뒤 긴 주기는 중복 아님 → 확인 신호로 발송·목표 갱신)
+    # (v2.42: 짧은 주기 발송 뒤 긴 주기는 중복 아님 → 확인 신호로 발송, 같은 포지션에 묶음)
     # 상위 주기 맥락
     "CLOUD_TF": os.environ.get("COIN_CLOUD_TF", "30m"),
     "ICHI_TENKAN": 9,
@@ -242,47 +242,30 @@ def find_swings(bars, k=None):
     return lows, highs
 
 
-def compute_levels(bars, side, entry, k=None, pad_pct=None, min_dist_pct=None, extreme_pad_pct=None,
-                   gap_pct=None):
-    """목표1/2. (v2.41: 채널 방식 — 손절·손익비 없음)
-    숏: 진입가 아래 스윙 저점을 가까운 순으로 목표1·목표2(저점 +여유 — 닿기
-    직전에 익절). 롱은 대칭(고점 −여유).
-    v2.40: 여유 적용 후 진입가 대비 min_dist_pct(0.15%) 미만인 스윙은 건너뛰고
-    다음 스윙. 모자라면 구간 극값(숏 = 최저가 +0.1%, 롱 = 최고가 −0.1%)을 같은
-    조건(방향·최소 거리, 목표2는 목표1보다 멀리)으로 시도. 그래도 없으면 None.
-    v2.42: 목표2는 목표1에서 gap_pct(0.1%, 목표1 대비) 이상 멀어야 함. 안 되면
-    다음 후보(스윙 → 구간 극값), 후보는 있었는데 전부 가까우면 목표2 = 목표1
-    ±gap_pct(src "gap_fix"). 목표1 뒤에 후보가 아예 없으면 None 그대로.
-    src = 각 값의 출처 swing/extreme/gap_fix."""
-    k = CONFIG["SWING_K"] if k is None else k
-    pad = (CONFIG["LEVEL_PAD_PCT"] if pad_pct is None else pad_pct) / 100.0
-    min_d = (CONFIG["MIN_LEVEL_DIST_PCT"] if min_dist_pct is None else min_dist_pct) / 100.0
-    xpad = (CONFIG["EXTREME_PAD_PCT"] if extreme_pad_pct is None else extreme_pad_pct) / 100.0
-    gap = (CONFIG["TARGET_GAP_PCT"] if gap_pct is None else gap_pct) / 100.0
+def tp_pct_for(bar_close_ms):
+    """v2.44 TP %. 신호 시각(② 마감)이 UTC 토·일이면 주말 값."""
+    wd = datetime.fromtimestamp((bar_close_ms + 1) / 1000, timezone.utc).weekday()
+    return CONFIG["TP_WEEKEND_PCT"] if wd >= 5 else CONFIG["TP_PCT"]
+
+
+def tp_price(side, entry, pct):
+    return entry * (1 + pct / 100.0) if side == "long" else entry * (1 - pct / 100.0)
+
+
+def ref_swing(bars, side, entry, k=None):
+    """v2.44 참고용 직전 스윙: 롱 = 진입가보다 위인 가장 최근 스윙 고점, 숏 = 아래인
+    가장 최근 스윙 저점. 없으면 None."""
     lows, highs = find_swings(bars, k)
-    sign = 1 if side == "long" else -1      # 목표 쪽 방향
-
-    def ok(level):
-        return (level - entry) / entry * sign >= min_d
-
-    if side == "short":
-        targets = [p * (1 + pad) for p in sorted({p for _, p in lows}, reverse=True)]
-        x_target = min(b["l"] for b in bars) * (1 + xpad) if bars else None
+    if side == "long":
+        cands = [p for _, p in sorted(highs, reverse=True) if p > entry]
     else:
-        targets = [p * (1 - pad) for p in sorted({p for _, p in highs})]
-        x_target = max(b["h"] for b in bars) * (1 - xpad) if bars else None
-    targets = [(p, "swing") for p in targets if ok(p)]
-    if x_target is not None and ok(x_target) and \
-            (not targets or (x_target - targets[-1][0]) * sign > 0):
-        targets.append((x_target, "extreme"))
-    if not targets:
-        return {"target1": None, "target2": None, "src": {"target1": None, "target2": None}}
-    t1, s1 = targets[0]
-    rest = targets[1:]
-    t2, s2 = next(((p, s) for p, s in rest if (p - t1) / t1 * sign >= gap - 1e-12), (None, None))
-    if t2 is None and rest:
-        t2, s2 = t1 * (1 + sign * gap), "gap_fix"
-    return {"target1": t1, "target2": t2, "src": {"target1": s1, "target2": s2}}
+        cands = [p for _, p in sorted(lows, reverse=True) if p < entry]
+    return cands[0] if cands else None
+
+
+def bar_range_pct(b):
+    """v2.44 봉 변동폭 (고가−저가)/시가 %."""
+    return (b["h"] - b["l"]) / b["o"] * 100.0 if b["o"] else None
 
 
 def liquidation_price(side, entry, pct=None):
@@ -375,20 +358,36 @@ def pullback_check(bars, side, entry, n=None, min_pct=None):
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게).
+    v2.44: 목표 = 진입가 ± TP(조회 불필요). 신호 주기 봉에서 ② 확인봉 변동폭,
+    1m 봉에서 참고 직전 고점/저점.
     v2.43.1 spot_entry(Webhook = 선물 진입가): 되돌림 판정만 현물 환산가로 비교.
     환산가 = 신호 봉 마감 시각의 현물 5m 종가(이미 받은 5m 봉). 5m 봉이 그 시각에
     안 끝나면(1m 신호 대부분) 이미 받은 신호 주기 현물 봉의 종가. 둘 다 없으면
     선물가 그대로 비교하고 entry_spot = None."""
-    out = {"target1": None, "target2": None, "src": {},
+    pct = tp_pct_for(bar_close_ms)
+    out = {"tp": tp_price(side, entry, pct), "tp_pct": pct,
+           "confirm_range_pct": None, "ref_swing": None,
            "cloud": None, "htf_rsi": None, "pullback": None, "entry_spot": None,
-           "errors": {}}   # {"levels"|"cloud"|"htf_rsi"|"pullback": 사유}
+           "errors": {}}   # {"bar"|"ref"|"cloud"|"htf_rsi"|"pullback": 사유}
     bars = []
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
         bars = [b for b in bars if b["T"] <= bar_close_ms]   # 신호 봉까지만
-        out.update(compute_levels(bars, side, entry))
+        conf = [b for b in bars if b["T"] == bar_close_ms]
+        out["confirm_range_pct"] = bar_range_pct(conf[0]) if conf else None
     except Exception as e:
-        out["errors"]["levels"] = _err_text(e)
+        out["errors"]["bar"] = _err_text(e)
+    try:
+        if tf == "1m":
+            if "bar" in out["errors"]:
+                raise KlinesError(out["errors"]["bar"])
+            b1 = bars
+        else:
+            b1 = [b for b in fetch(symbol, "1m", limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
+                  if b["T"] <= bar_close_ms]
+        out["ref_swing"] = ref_swing(b1, side, entry)
+    except Exception as e:
+        out["errors"]["ref"] = _err_text(e)
     try:
         cb = fetch(symbol, CONFIG["CLOUD_TF"], limit=120, end_ms=bar_close_ms)
         out["cloud"] = cloud_context(entry, ichimoku_cloud(cb), side)

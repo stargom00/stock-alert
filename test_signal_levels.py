@@ -1,4 +1,6 @@
 """v2.37 — signal_levels: RSI·스윙·목표/손절·이치모쿠 순수 계산 테스트."""
+from datetime import datetime, timezone
+
 import pytest
 
 import signal_levels as lv
@@ -58,7 +60,7 @@ def test_find_swings_requires_strict():
     assert lv.find_swings(bars, k=2)[0] == []
 
 
-# ── 목표/손절 ──
+# ── v2.44 고정 TP · 참고 직전 스윙 · 확인봉 변동폭 ──
 
 def _short_bars():
     # 스윙 저점 98(idx3), 95(idx11); 스윙 고점 103(idx7). 마지막 봉 종가 100.
@@ -67,18 +69,30 @@ def _short_bars():
     return [B(h, l) for h, l in zip(highs, lows)]
 
 
-def test_levels_short():
-    lv_ = lv.compute_levels(_short_bars(), "short", 100.0, k=3, pad_pct=0.05)
-    assert lv_["target1"] == pytest.approx(98.0 * 1.0005)    # 저점 +여유
-    assert lv_["target2"] == pytest.approx(95.0 * 1.0005)
+def _ms(*a):
+    return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
 
 
-def test_levels_long_mirror():
-    # 숏 배열을 200 기준으로 뒤집은 것 → 같은 구조의 롱
-    bars = [B(200 - b["l"], 200 - b["h"]) for b in _short_bars()]
-    lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05)
-    assert lv_["target1"] == pytest.approx(102.0 * 0.9995)   # 고점 −여유
-    assert lv_["target2"] == pytest.approx(105.0 * 0.9995)
+def test_tp_price_and_weekend_pct():
+    assert lv.tp_price("long", 82_050.0, 0.5) == pytest.approx(82_460.25)
+    assert lv.tp_price("short", 100.0, 0.5) == pytest.approx(99.5)
+    # 신호 시각 = ② 마감(표시 시각과 같음). 10-16 금 23:55 → 0.5 / 10-17 토 00:00·00:05 → 0.3 / 10-19 월 → 0.5
+    assert lv.tp_pct_for(_ms(2026, 10, 16, 23, 55) - 1) == 0.5
+    assert lv.tp_pct_for(_ms(2026, 10, 17, 0, 0) - 1) == 0.3
+    assert lv.tp_pct_for(_ms(2026, 10, 17, 0, 5) - 1) == 0.3
+    assert lv.tp_pct_for(_ms(2026, 10, 18, 23, 59) - 1) == 0.3
+    assert lv.tp_pct_for(_ms(2026, 10, 19, 0, 5) - 1) == 0.5
+    ctx = lv.build_signal_context("BTCUSDT", "5m", "short", 100.0, _ms(2026, 10, 17, 9, 5) - 1,
+                                  fetch=lambda *a, **kw: [])
+    assert (ctx["tp_pct"], ctx["tp"]) == (0.3, pytest.approx(99.7))
+
+
+def test_ref_swing_most_recent_beyond_entry():
+    bars = _short_bars()
+    assert lv.ref_swing(bars, "short", 100.0, k=3) == 95.0     # 가장 최근 스윙 저점(idx11)
+    assert lv.ref_swing(bars, "short", 94.0, k=3) is None
+    assert lv.ref_swing(bars, "long", 100.0, k=3) == 103.0
+    assert lv.bar_range_pct({"o": 100.0, "h": 100.01, "l": 99.995}) == pytest.approx(0.015)
 
 
 def test_liquidation_price():
@@ -179,74 +193,7 @@ def test_build_context_records_reasons():
 
     ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 100.0, 59_999, fetch=fetch)
     assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
-                             for k in ("levels", "cloud", "htf_rsi", "pullback")}
+                             for k in ("bar", "ref", "cloud", "htf_rsi", "pullback")}
     assert lv.price_basis() == "현물"
 
 
-# ── v2.40 최소 거리·구간 극값 (v2.41: 목표만) ──
-
-# 스윙 저점 99.9(idx3)·99.0(idx7)·98.0(idx11), 스윙 고점 100.6(idx9).
-# 양 끝(0~2, 13~15)은 스윙 후보가 아님 — 최고가 100.7(idx14), 최저가 97.0(idx15)
-_L = [100.2, 100.1, 100.0, 99.9, 100.0, 100.1, 100.2, 99.0, 100.2, 100.3, 100.2, 98.0, 100.2, 100.3, 100.4, 97.0]
-MIN_BARS = [B(l + 0.3, l) for l in _L]
-
-
-def test_swing_closer_than_min_dist_skipped():
-    lv_ = lv.compute_levels(MIN_BARS, "short", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)
-    # 99.9 스윙 → 99.95(0.05%) 건너뜀 → 다음 스윙들
-    assert lv_["target1"] == pytest.approx(99.0 * 1.0005)
-    assert lv_["target2"] == pytest.approx(98.0 * 1.0005)
-    assert lv_["src"] == {"target1": "swing", "target2": "swing"}
-    # 최소 거리 0이면(옛 동작) 99.9 스윙이 목표1
-    assert lv.compute_levels(MIN_BARS, "short", 100.0, k=3, pad_pct=0.05,
-                             min_dist_pct=0)["target1"] == pytest.approx(99.9 * 1.0005)
-
-
-def test_extreme_also_too_close_is_none():
-    # 진입 97.2 숏: 진입가 아래 스윙 없음 → 최저가 97.0 +0.1% = 97.097(0.106%) < 0.15% → 없음
-    lv_ = lv.compute_levels(MIN_BARS, "short", 97.2, k=3, pad_pct=0.05,
-                            min_dist_pct=0.15, extreme_pad_pct=0.1)
-    assert lv_["target1"] is None and lv_["target2"] is None
-
-
-def test_target2_falls_back_to_window_extreme():
-    # 진입 98.8: 목표 스윙은 98.0 하나 → 목표2 = 최저가 97.0 +0.1%
-    lv_ = lv.compute_levels(MIN_BARS, "short", 98.8, k=3, pad_pct=0.05,
-                            min_dist_pct=0.15, extreme_pad_pct=0.1)
-    assert lv_["target1"] == pytest.approx(98.0 * 1.0005)
-    assert lv_["target2"] == pytest.approx(97.0 * 1.001)
-    assert lv_["src"]["target2"] == "extreme"
-
-
-def test_target2_min_gap_next_swing_or_gap_fix():
-    # 스윙 저점 99.0·98.95(목표1 대비 0.05% — 너무 가까움)·98.0
-    l = [100.2, 100.1, 100.0, 99.0, 100.0, 100.1, 100.2, 98.95, 100.2, 100.3, 100.2, 98.0, 100.2, 100.3, 100.4, 100.5]
-    bars = [B(x + 0.3, x) for x in l]
-    lv_ = lv.compute_levels(bars, "short", 100.0, k=3, pad_pct=0, min_dist_pct=0.15, gap_pct=0.1)
-    assert (lv_["target1"], lv_["target2"]) == (99.0, 98.0)          # 98.95 건너뛰고 다음 스윙
-    assert lv_["src"]["target2"] == "swing"
-    # 98.0 스윙이 없고 남은 후보(98.95, 극값 98.95)가 전부 가까우면 → 목표1 −0.1% (간격 보정)
-    l2 = l[:11] + [100.1] + l[12:]
-    lv_ = lv.compute_levels([B(x + 0.3, x) for x in l2], "short", 100.0, k=3, pad_pct=0,
-                            min_dist_pct=0.15, extreme_pad_pct=0, gap_pct=0.1)
-    assert lv_["target1"] == 99.0 and lv_["target2"] == pytest.approx(99.0 * 0.999)
-    assert lv_["src"]["target2"] == "gap_fix"
-    # 롱 대칭
-    lv_ = lv.compute_levels([B(200 - x, 199.7 - x) for x in l2], "long", 100.0, k=3, pad_pct=0,
-                            min_dist_pct=0.15, extreme_pad_pct=0, gap_pct=0.1)
-    assert lv_["target1"] == pytest.approx(101.0) and lv_["target2"] == pytest.approx(101.0 * 1.001)
-    assert lv_["src"]["target2"] == "gap_fix"
-
-
-def test_gap_fix_shown_in_message():
-    sig = {"id": 1, "symbol": "BTCUSDT", "tf": "5m", "side": "short", "entry": 100.0,
-           "bar_close_ms": 1792051499999, "target1": 99.0, "target2": 98.901,
-           "level_src": {"target1": "swing", "target2": "gap_fix"}, "cloud": None, "htf_rsi": None}
-    import signal_tracker as tr
-    assert "목표2 98.901 (−1.10%) (간격 보정)" in tr.format_signal_message(sig).split("\n")
-
-
-def test_long_min_dist_mirror():
-    bars = [B(200 - b["l"], 200 - b["h"]) for b in MIN_BARS]
-    lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)
-    assert lv_["target1"] == pytest.approx(101.0 * 0.9995)   # 100.1 스윙(0.05%) 건너뜀

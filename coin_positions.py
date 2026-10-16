@@ -4,14 +4,14 @@
 
 규칙
   - 발송된 신호의 심볼에 열린 포지션이 없으면 신규(1차 = ②확인봉 종가, 1단위).
-    목표1/2는 1차 진입 때 값 고정.
+    v2.44: 목표 = 단일 고정 TP(1차 신호 진입가 ± TP_PCT, 주말 TP_WEEKEND_PCT).
   - 같은 방향 신호: 평단 대비 ADD_THRESHOLD_PCT 이상 역행 중이고 추가 < MAX_ADDS
     이고 아직 덜어내기 전이면 추가 진입(ADD_QTY), 평단 = 수량 가중 평균.
   - 반대 방향 신호: 포지션 동작 없음(신호 쪽에서 저장만).
   - 1m 봉 추적: 포기선(평단 대비 GIVEUP_PCT 역행) → 종료. 추가분이 있고 가격이
-    평단에 닿으면 추가분만 덜어내기(평단 = 1차 진입가로 복귀, 1회). 목표1 → 절반
-    청산. 목표2 → 종료. POS_EXPIRE_HOURS 미종료 → 만료.
-  - 한 봉 안에서는 역행(포기선)을 먼저 본다(보수적) → 덜어내기 → 목표1 → 목표2.
+    평단에 닿으면 추가분만 덜어내기(평단 = 1차 진입가로 복귀, 1회). TP → 전량
+    종료. POS_EXPIRE_HOURS 미종료 → 만료. (v2.44: 목표1 절반·목표2 분할 삭제)
+  - 한 봉 안에서는 역행(포기선)을 먼저 본다(보수적) → 덜어내기 → TP.
   - 결과 % = 청산된 수량 가중 평균 수익률(각 청산의 기준가 대비).
   - MFE/MAE = 매 봉 그 시점 평단 대비 최대 유리/역행 폭(포지션 전체).
 저장: $DATA_DIR/positions.json (신호 파일과 분리).
@@ -140,9 +140,9 @@ def new_position(positions, sig):
         "id": pid, "symbol": sig["symbol"], "side": sig["side"], "tf": sig["tf"],
         "status": "open", "result": None, "result_pct": None,
         "opened_ms": ms, "closed_ms": None, "signal_ids": [sig["id"]],
-        "entry1": sig["entry"], "target1": sig.get("target1"), "target2": sig.get("target2"),
+        "entry1": sig["entry"], "tp": sig.get("tp"), "tp_pct": sig.get("tp_pct"),
         "cloud_bias": (sig.get("cloud") or {}).get("bias"),
-        "qty": 1.0, "avg": sig["entry"], "adds": [], "trimmed": False, "t1_done": False,
+        "qty": 1.0, "avg": sig["entry"], "adds": [], "trimmed": False,
         "realized": [], "events": [],
         "checked_until_ms": sig["bar_close_ms"], "last_close": None,
         "mfe_pct": 0.0, "mae_pct": 0.0,
@@ -175,13 +175,20 @@ def try_add(pos, sig):
     return True, f"포지션 #P{pos['id']} 추가 {n}회차 (평단 {fmt_px(old)} → {fmt_px(pos['avg'])})"
 
 
+def pos_tp(pos):
+    """v2.44 이전에 열린 포지션(목표1/2)은 목표2(없으면 목표1)를 TP로 봄."""
+    if "tp" in pos:
+        return pos["tp"]
+    return pos.get("target2") if pos.get("target2") is not None else pos.get("target1")
+
+
 def update_position(pos, bars, now_ms, until_ms=None):
     """마감된 1m 봉으로 포지션 갱신(제자리 수정). 이벤트 한 줄 메시지 리스트."""
     if pos["status"] != "open":
         return []
     side, pid = pos["side"], pos["id"]
     expire_ms = pos["opened_ms"] + int(CONFIG["POS_EXPIRE_HOURS"] * 3_600_000)
-    t1, t2 = pos.get("target1"), pos.get("target2")
+    tp = pos_tp(pos)
     up = side == "long"
     msgs = []
 
@@ -219,18 +226,10 @@ def update_position(pos, bars, now_ms, until_ms=None):
             pos["trimmed"] = True
             _event(pos, ms, "trim", price, pct=ret)
             msgs.append(f"#P{pid} 추가분 덜어내기 (평단 복귀, 추가분 {fmt_pct(ret)})")
-        # 3) 목표1 — 절반 청산
-        if t1 is not None and not pos["t1_done"] and reaches(t1, b):
-            half = pos["qty"] / 2.0
-            pct = _realize(pos, "target1", half, t1, pos["avg"])
-            pos["qty"] -= half
-            pos["t1_done"] = True
-            _event(pos, ms, "target1", t1, pct=pct)
-            msgs.append(f"#P{pid} 목표1 ({fmt_pct(pct)}, {fmt_dur(ms - pos['opened_ms'])})")
-        # 4) 목표2 — 종료
-        if t2 is not None and pos["t1_done"] and reaches(t2, b):
-            ev = _close(pos, ms, "hit_target2", t2)
-            msgs.append(f"#P{pid} 종료 목표2 ({fmt_pct(ev['pct'])})")
+        # 3) TP — 전량 종료
+        if tp is not None and reaches(tp, b):
+            ev = _close(pos, ms, "hit_tp", tp)
+            msgs.append(f"#P{pid} 종료 TP ({fmt_pct(ev['pct'])}, {fmt_dur(ms - pos['opened_ms'])})")
             break
 
     if pos["status"] == "open" and pos["checked_until_ms"] + 1 >= expire_ms and pos["last_close"] is not None:
@@ -246,7 +245,7 @@ def on_signal(sig, fetch, path=None, now_ms=None, bind_pid=None):
     confirm이면 None), msgs = 신호 직전까지 따라잡기 추적에서 생긴 이벤트 줄
     (신호보다 먼저 발송).
     v2.42 bind_pid: 1m → 5m 확인 신호. 그 포지션이 아직 열려 있으면 추가 없이
-    묶고 목표1/2를 이 신호 값으로 갱신(값이 없는 쪽은 유지)."""
+    묶음(v2.44: 고정 TP라 목표 갱신 없음)."""
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     msgs = []
     with _lock:
@@ -270,15 +269,11 @@ def on_signal(sig, fetch, path=None, now_ms=None, bind_pid=None):
             _event(pos, sig["bar_close_ms"] + 1, "opposite_signal", sig["entry"])
             pos["events"][-1]["signal_id"] = sig["id"]
         elif bind_pid is not None and pos["id"] == bind_pid:
+            # v2.44: 고정 TP라 목표 갱신 없이 같은 포지션에 묶기만
             action, line = "confirm", None
-            old = (pos.get("target1"), pos.get("target2"))
-            for key in ("target1", "target2"):
-                if sig.get(key) is not None:
-                    pos[key] = sig[key]
             pos["signal_ids"].append(sig["id"])
-            _event(pos, sig["bar_close_ms"] + 1, "retarget", sig["entry"])
-            pos["events"][-1].update(signal_id=sig["id"], old_targets=list(old),
-                                     targets=[pos.get("target1"), pos.get("target2")])
+            _event(pos, sig["bar_close_ms"] + 1, "confirm", sig["entry"])
+            pos["events"][-1]["signal_id"] = sig["id"]
         else:
             added, line = try_add(pos, sig)
             action = "add" if added else "hold"
@@ -319,6 +314,10 @@ def _avg(xs):
     return sum(xs) / len(xs) if xs else None
 
 
+def _result(p):
+    return "hit_tp" if p["result"] == "hit_target2" else p["result"]   # v2.44 이전 목표2 종료 = TP
+
+
 def summarize_positions(positions, now_ms, days):
     since = now_ms - days * 86_400_000
     sub = [p for p in positions if p["opened_ms"] >= since]
@@ -329,16 +328,15 @@ def summarize_positions(positions, now_ms, days):
 
     return {
         "days": days, "n": len(sub), "closed": len(closed), "open": len(sub) - len(closed),
-        "by_result": {k: sum(1 for p in closed if p["result"] == k)
-                      for k in ("hit_target2", "giveup", "expired")},
+        "by_result": {k: sum(1 for p in closed if _result(p) == k)
+                      for k in ("hit_tp", "giveup", "expired")},
         "avg_result": _avg(p["result_pct"] for p in closed),
         "with_adds": res([p for p in closed if p["adds"]]),
         "no_adds": res([p for p in closed if not p["adds"]]),
-        # v2.42.1: 건수(추가·목표1·덜어내기)는 보유 중 포함 같은 범위로 셈. 결과 % 비교만 종료 기준.
+        # v2.42.1: 건수(추가·덜어내기)는 보유 중 포함 같은 범위로 셈. 결과 % 비교만 종료 기준.
         # (예전엔 추가 있음이 종료만, 덜어내기는 보유 포함이라 "추가 0건 · 덜어내기 1건"이 나옴)
         "adds_n": sum(1 for p in sub if p["adds"]),
         "trims": sum(1 for p in sub if p["trimmed"]),
-        "t1_hits": sum(1 for p in sub if p["t1_done"]),
         "max_mae": max((p["mae_pct"] for p in sub), default=None),
         "cloud_with": res([p for p in closed if p.get("cloud_bias") == "편"]),
         "cloud_against": res([p for p in closed if p.get("cloud_bias") == "역"]),
@@ -347,14 +345,14 @@ def summarize_positions(positions, now_ms, days):
 
 def format_position_summary(s, cloud_tf="30m"):
     br = s["by_result"]
-    lines = [f"[최근 {s['days']}일] 포지션 {s['n']} (종료 {s['closed']}: 목표2 {br['hit_target2']} · "
+    lines = [f"[최근 {s['days']}일] 포지션 {s['n']} (종료 {s['closed']}: TP {br['hit_tp']} · "
              f"포기선 {br['giveup']} · 만료 {br['expired']} / 보유 {s['open']})"]
     if s["n"]:
         lines.append(f"평균 결과 {fmt_pct(s['avg_result'])} · 최대 MAE "
                      f"{fmt_pct(-s['max_mae']) if s['max_mae'] is not None else '—'}")
         lines.append(f"종료 결과 — 추가 있음: {fmt_pct(s['with_adds'][0])} ({s['with_adds'][1]}건) · "
                      f"없음: {fmt_pct(s['no_adds'][0])} ({s['no_adds'][1]}건)")
-        lines.append(f"보유 포함 — 추가 {s['adds_n']}건 · 목표1 도달 {s['t1_hits']}건 · 덜어내기 {s['trims']}건")
+        lines.append(f"보유 포함 — 추가 {s['adds_n']}건 · 덜어내기 {s['trims']}건")
         lines.append(f"{cloud_tf} 구름 편: {fmt_pct(s['cloud_with'][0])} ({s['cloud_with'][1]}건) · "
                      f"역: {fmt_pct(s['cloud_against'][0])} ({s['cloud_against'][1]}건)")
     return lines
