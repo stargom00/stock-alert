@@ -347,6 +347,8 @@ def summarize_positions(positions, now_ms, days):
         "by_result": {k: sum(1 for p in closed if p["result"] == k) for k in ("hit_tp", "giveup", "expired")},
         "tp_avg_ms": _avg(tp_ms),
         "mae_over": sum(1 for p in sub if p["mae_pct"] > MAE_FLAG_PCT),
+        "max_mae": max((p["mae_pct"] for p in sub), default=None),   # v2.44.2 복구 (보유 포함)
+        "trims": sum(1 for p in sub if p["trimmed"]),
         "with_adds": grp([p for p in closed if p["adds"]]),
         "no_adds": grp([p for p in closed if not p["adds"]]),
         "pb_ok": grp([p for p in closed if p.get("pullback_ok") is True]),
@@ -361,6 +363,7 @@ def format_position_summary(s):
     if s["n"]:
         avg = fmt_dur(s["tp_avg_ms"]) if s["tp_avg_ms"] is not None else "—"
         lines.append(f"TP까지 평균 {avg} · MAE {fmt_pct(-MAE_FLAG_PCT)} 넘음 {s['mae_over']}/{s['n']}")
+        lines.append(f"최대 MAE {fmt_pct(-s['max_mae'])} · 덜어내기 {s['trims']}건")
         wa, na = s["with_adds"], s["no_adds"]
         lines.append(f"추가 있음 TP {fmt_rate(wa['tp'], wa['n'])} · 평균 {fmt_pct(wa['avg'])} | "
                      f"없음 TP {fmt_rate(na['tp'], na['n'])} · 평균 {fmt_pct(na['avg'])}")

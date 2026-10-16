@@ -377,6 +377,7 @@ def test_summary_still_suppressed_and_legacy_split():
     lines = tr.format_summary(sigs + [legacy], [pos_legacy], now).split("\n")
     assert lines[0].startswith("📊 코인 요약 (")
     assert "[최근 7일] 포지션 0 (TP 0 · 포기선 0 · 만료 0 / 보유 0)" in lines
+    assert "신호: 발송 2 · 억제 3 · 중복 0 · 반대방향 0" in lines           # 이전 신호 1 포함
     assert "미동 억제 3건 → TP 1/2 (50%) (기록 중 1)" in lines
     assert "v2.44 이전: 포지션 1 (목표2 1 · 포기선 0 · 만료 0 / 보유 0) · 발송 신호 1" in lines
 
@@ -401,3 +402,21 @@ def test_webhook_pullback_uses_spot_converted_entry(tmp_path):
     # 자체 판정(현물 진입가)은 환산 안 함
     s_ = tr.ingest_signal("ETHUSDT", "5m", "long", 81_540.0, t0 - 300_000, "self", sent.append, fetch, p)
     assert s_["entry_spot"] is None and s_["pullback_ok"] is True
+
+
+def test_suppressed_signal_does_not_block_same_tf_next_signal(tmp_path, monkeypatch):
+    """v2.44.2 Railway 12:27 #0042 미동 억제 → 12:29~12:38 같은 1m 롱 전부 "중복 무시" 재현."""
+    p = str(tmp_path / "s.json")
+    ctxs = iter([_ctx(range_pct=0.01), _ctx(), _ctx()])
+    monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: next(ctxs))
+    sent = []
+    t = utc_ms(2026, 10, 17, 12, 26)
+    a = tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, t, "webhook", sent.append, no_fetch, path=p)
+    assert a["suppressed"] and not a["sent"]
+    # 같은 봉을 자체 판정이 또 내면 여전히 중복(두 번 저장 안 함)
+    assert tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, t, "self", sent.append, no_fetch, path=p) is None
+    b = tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, t + 2 * MIN, "self", sent.append, no_fetch, path=p)
+    assert b is not None and b["sent"] and len(sent) == 1
+    # 발송된 신호는 계속 기준 — 30봉 안 다음 신호는 중복
+    assert tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, t + 5 * MIN, "webhook", sent.append, no_fetch,
+                            path=p) is None

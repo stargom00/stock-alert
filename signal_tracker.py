@@ -197,13 +197,22 @@ def format_signal_message(sig):
 # ── 수신·중복 제거·발송 ──────────────────────────────────────────────
 
 def is_duplicate(signals, symbol, tf, side, bar_open_ms, n_bars=None):
-    """같은 심볼·주기·방향의 저장된(=발송된) 신호와 N봉 이내면 중복.
+    """같은 심볼·주기·방향의 발송된 신호와 N봉 이내면 중복.
     저장된 신호 기준이라 재시작 후에도 유지되고, Webhook과 자체 판정이 같은
-    봉을 둘 다 내도 하나만 나간다."""
+    봉을 둘 다 내도 하나만 나간다.
+    v2.44.2: N봉 기준은 실제 발송(sent)된 신호만 — 억제·교차 중복·반대방향 보류
+    신호가 뒤 정상 신호를 막지 않게(교차 중복과 동일). 단 같은 봉(같은 bar_open_ms)은
+    발송 여부와 상관없이 중복 — Webhook·자체 판정이 같은 봉을 두 번 저장하지 않게."""
     n_bars = lv.dedup_bars(tf) if n_bars is None else n_bars
     span = n_bars * TF_MS[tf]
-    return any(s["symbol"] == symbol and s["tf"] == tf and s["side"] == side
-               and abs(bar_open_ms - s["bar_open_ms"]) < span for s in signals)
+    for s in signals:
+        if s["symbol"] != symbol or s["tf"] != tf or s["side"] != side:
+            continue
+        if s["bar_open_ms"] == bar_open_ms:
+            return True
+        if s.get("sent", True) and abs(bar_open_ms - s["bar_open_ms"]) < span:
+            return True
+    return False
 
 
 def suppress_reason(confirm_range_pct):
@@ -566,6 +575,15 @@ def format_still_line(st):
             + (f" (기록 중 {pend})" if pend else ""))
 
 
+def signal_counts(signals, now_ms, days):
+    since = now_ms - days * 86_400_000
+    w = [s for s in signals if s["bar_close_ms"] >= since]
+    return {"sent": sum(1 for s in w if s.get("sent", True)),
+            "suppressed": sum(1 for s in w if s.get("suppressed")),
+            "duplicate": sum(1 for s in w if s.get("duplicate")),
+            "opposite": sum(1 for s in w if s.get("opposite_of"))}
+
+
 def format_summary(signals, positions, now_ms, windows=(7, 30)):
     """v2.44 요약: v2.44 포지션(고정 TP) 기준 + 미동 억제 + v2.44 이전 기록 분리."""
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
@@ -573,6 +591,9 @@ def format_summary(signals, positions, now_ms, windows=(7, 30)):
     for days in windows:
         lines.append("")
         lines += cp.format_position_summary(cp.summarize_positions(positions, now_ms, days))
+        c = signal_counts(signals, now_ms, days)     # v2.44.2 복구
+        lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
+                     f"반대방향 {c['opposite']}")
         lines.append(format_still_line(still_stats(signals, now_ms, days)))
         legacy = cp.format_legacy_line(cp.summarize_legacy(positions, now_ms, days),
                                        sum(1 for s in signals if "tp" not in s and s.get("sent", True)

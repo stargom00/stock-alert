@@ -179,6 +179,7 @@ def test_position_summary_v244_and_legacy_split():
     assert cp.format_position_summary(s) == [
         "[최근 7일] 포지션 5 (TP 2 · 포기선 1 · 만료 1 / 보유 1)",
         "TP까지 평균 2시간 0분 · MAE −0.50% 넘음 3/5",
+        "최대 MAE −3.00% · 덜어내기 0건",
         "추가 있음 TP 1/2 (50%) · 평균 −1.25% | 없음 TP 1/2 (50%) · 평균 +0.15%",
         "되돌림 ✓ TP 1/2 (50%) | ⚠️ TP 1/2 (50%)",
     ]
