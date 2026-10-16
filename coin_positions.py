@@ -334,6 +334,9 @@ def summarize_positions(positions, now_ms, days):
         "avg_result": _avg(p["result_pct"] for p in closed),
         "with_adds": res([p for p in closed if p["adds"]]),
         "no_adds": res([p for p in closed if not p["adds"]]),
+        # v2.42.1: 건수(추가·목표1·덜어내기)는 보유 중 포함 같은 범위로 셈. 결과 % 비교만 종료 기준.
+        # (예전엔 추가 있음이 종료만, 덜어내기는 보유 포함이라 "추가 0건 · 덜어내기 1건"이 나옴)
+        "adds_n": sum(1 for p in sub if p["adds"]),
         "trims": sum(1 for p in sub if p["trimmed"]),
         "t1_hits": sum(1 for p in sub if p["t1_done"]),
         "max_mae": max((p["mae_pct"] for p in sub), default=None),
@@ -349,9 +352,9 @@ def format_position_summary(s, cloud_tf="30m"):
     if s["n"]:
         lines.append(f"평균 결과 {fmt_pct(s['avg_result'])} · 최대 MAE "
                      f"{fmt_pct(-s['max_mae']) if s['max_mae'] is not None else '—'}")
-        lines.append(f"추가 있음: {fmt_pct(s['with_adds'][0])} ({s['with_adds'][1]}건) · "
+        lines.append(f"종료 결과 — 추가 있음: {fmt_pct(s['with_adds'][0])} ({s['with_adds'][1]}건) · "
                      f"없음: {fmt_pct(s['no_adds'][0])} ({s['no_adds'][1]}건)")
-        lines.append(f"목표1 도달 {s['t1_hits']}건 · 덜어내기 {s['trims']}건")
+        lines.append(f"보유 포함 — 추가 {s['adds_n']}건 · 목표1 도달 {s['t1_hits']}건 · 덜어내기 {s['trims']}건")
         lines.append(f"{cloud_tf} 구름 편: {fmt_pct(s['cloud_with'][0])} ({s['cloud_with'][1]}건) · "
                      f"역: {fmt_pct(s['cloud_against'][0])} ({s['cloud_against'][1]}건)")
     return lines

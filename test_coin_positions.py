@@ -166,7 +166,23 @@ def test_position_summary():
     assert cp.format_position_summary(s) == [
         "[최근 7일] 포지션 5 (종료 4: 목표2 2 · 포기선 1 · 만료 1 / 보유 1)",
         "평균 결과 −0.40% · 최대 MAE −3.00%",
-        "추가 있음: −1.20% (2건) · 없음: +0.40% (2건)",
-        "목표1 도달 2건 · 덜어내기 1건",
+        "종료 결과 — 추가 있음: −1.20% (2건) · 없음: +0.40% (2건)",
+        "보유 포함 — 추가 2건 · 목표1 도달 2건 · 덜어내기 1건",
         "30m 구름 편: +0.80% (2건) · 역: −3.00% (1건)",
     ]
+
+
+def test_summary_open_trimmed_position_counts_consistent(pp):
+    # 실제 경로 재현: 1차 → 역행 추가 → 평단 복귀 덜어내기 → 아직 보유 중 + 추가 없이 종료된 포지션 1개
+    cp.on_signal(sig(1, "long", 100.0, T0), no_bars, path=pp)
+    assert cp.on_signal(sig(2, "long", 99.4, T0 + 5 * MIN), no_bars, path=pp)[0] == "add"
+    cp.track_positions(lambda m: None, lambda *a, **kw: [bar(6, 99.8, 99.5)], path=pp, now_ms=T0 + 7 * MIN)
+    ps = cp.load_positions(pp)
+    assert ps[0]["trimmed"] and ps[0]["adds"] and ps[0]["status"] == "open"
+    ps.append({"id": 2, "opened_ms": T0, "status": "closed", "result": "giveup", "result_pct": -3.0,
+               "adds": [], "cloud_bias": None, "mae_pct": 3.0, "trimmed": False, "t1_done": False})
+    s = cp.summarize_positions(ps, T0 + 3_600_000, 7)
+    assert s["trims"] <= s["adds_n"]                    # 덜어내기는 추가분이 있어야만 생김
+    lines = cp.format_position_summary(s)
+    assert "보유 포함 — 추가 1건 · 목표1 도달 0건 · 덜어내기 1건" in lines
+    assert "종료 결과 — 추가 있음: — (0건) · 없음: −3.00% (1건)" in lines

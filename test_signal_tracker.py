@@ -236,6 +236,11 @@ def test_parse_webhook_rejects(body):
 
 # ── v2.40 알림 억제·교차 중복 (v2.41: 억제는 목표1 거리만) ──
 
+def no_fetch(*a, **kw):
+    """봉 없음. 포지션 따라잡기가 실제 바이낸스를 부르지 않게(날짜 따라 결과가 바뀜)."""
+    return []
+
+
 def _ctx(target1=None, target2=None):
     return {"target1": target1, "target2": target2, "src": {},
             "cloud": None, "htf_rsi": None, "errors": {}}
@@ -251,7 +256,7 @@ def test_suppressed_saved_and_tracked_silently(tmp_path, monkeypatch):
     p = str(tmp_path / "s.json")
     monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: _ctx(target1=99.9))
     sent = []
-    sig = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
+    sig = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, no_fetch, path=p)
     assert sent == []
     assert (sig["suppressed"], sig["sent"], sig["position_id"]) == (True, False, None)   # 포지션도 안 만듦
     s = tr.load_signals(p)[0]
@@ -264,19 +269,19 @@ def test_cross_tf_duplicate(tmp_path, monkeypatch):
     p = str(tmp_path / "s.json")
     monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: _ctx())
     sent = []
-    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
+    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, no_fetch, path=p)
     assert a["sent"]
     # 1m ② 마감 08:15 = 5m 마감 08:05 + 10분 → 중복
-    b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 14), "self", sent.append, path=p)
+    b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 14), "self", sent.append, no_fetch, path=p)
     assert (b["duplicate"], b["dup_of"], b["sent"], b["position_id"]) == (True, a["id"], False, None)
     # v2.42 반대 순서: 1m 발송 뒤 10분 안 5m → 중복 아님, 확인 신호로 발송
-    d = tr.ingest_signal("ETHUSDT", "1m", "long", 10.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
-    e = tr.ingest_signal("ETHUSDT", "5m", "long", 10.0, utc_ms(2026, 10, 16, 9, 5), "self", sent.append, path=p)
+    d = tr.ingest_signal("ETHUSDT", "1m", "long", 10.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, no_fetch, path=p)
+    e = tr.ingest_signal("ETHUSDT", "5m", "long", 10.0, utc_ms(2026, 10, 16, 9, 5), "self", sent.append, no_fetch, path=p)
     assert d["sent"] and e["sent"] and not e["duplicate"]
     assert (e["confirm_of"], e["position_id"]) == (d["id"], d["position_id"])
     # 10분 초과면 중복 아님 (1m 마감 09:01, 5m 마감 09:15 → 14분)
-    g = tr.ingest_signal("SOLUSDT", "1m", "short", 1.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
-    h = tr.ingest_signal("SOLUSDT", "5m", "short", 1.0, utc_ms(2026, 10, 16, 9, 10), "self", sent.append, path=p)
+    g = tr.ingest_signal("SOLUSDT", "1m", "short", 1.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, no_fetch, path=p)
+    h = tr.ingest_signal("SOLUSDT", "5m", "short", 1.0, utc_ms(2026, 10, 16, 9, 10), "self", sent.append, no_fetch, path=p)
     assert g["sent"] and h["sent"] and not h["duplicate"]
     assert len(sent) == 5
 
@@ -317,8 +322,8 @@ def test_suppressed_signal_is_not_cross_dup_reference(tmp_path, monkeypatch):
     ctxs = iter([_ctx(target1=99.9), _ctx()])
     monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: next(ctxs))
     sent = []
-    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, path=p)
-    b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 6), "self", sent.append, path=p)
+    a = tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, utc_ms(2026, 10, 16, 8, 0), "self", sent.append, no_fetch, path=p)
+    b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 6), "self", sent.append, no_fetch, path=p)
     assert a["suppressed"] and b["sent"] and not b["duplicate"] and len(sent) == 1
 
 
