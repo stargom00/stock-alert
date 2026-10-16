@@ -133,10 +133,10 @@ def pullback_line(sig):
 
 
 def tp_line(sig):
-    """v2.44 목표 +0.5% → 82,460 (20배 ROI +10%)"""
+    """v2.44 TP +0.5% → 82,460 (20배 ROI +10%)"""
     pct = sig["tp_pct"]
     sign = "+" if sig["side"] == "long" else "−"
-    return (f"목표 {sign}{pct:g}% → {fmt_px(sig['tp'])} "
+    return (f"TP {sign}{pct:g}% → {fmt_px(sig['tp'])} "
             f"({CONFIG['TP_ROI_LEV']:g}배 ROI +{round(pct * CONFIG['TP_ROI_LEV'], 2):g}%)")
 
 
@@ -161,7 +161,7 @@ def format_signal_message(sig):
         lines.append(ref_line(sig))
     # v2.41: 손절·손익비 대신 청산가 참고(채널 방식 — 강제청산 리스크만 관리)
     liq = lv.liquidation_price(sig["side"], entry)
-    lines.append(f"청산가(10배 격리): {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})")
+    lines.append(f"청산가({CONFIG['TP_ROI_LEV']:g}배 격리): {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})")
     c = sig.get("cloud")
     if c:
         tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
@@ -543,66 +543,42 @@ def track_open_signals(send, fetch=lv.fetch_klines, path=None, now_ms=None):
 
 # ── 요약 (v2.41: 포지션 기준, 신호는 한 줄) ──────────────────────────
 
-def signal_counts(signals, now_ms, days):
-    since = now_ms - days * 86_400_000
-    w = [s for s in signals if s["bar_close_ms"] >= since]
-    return {"sent": sum(1 for s in w if s.get("sent", True)),
-            "suppressed": sum(1 for s in w if s.get("suppressed")),
-            "duplicate": sum(1 for s in w if s.get("duplicate")),
-            "opposite": sum(1 for s in w if s.get("opposite_of"))}
-
-
 def _is_tp(s):
-    return s.get("result") in ("hit_tp", "hit_target1", "hit_target2")   # v2.44 이전 기록은 목표1 = TP
+    return s.get("result") == "hit_tp"
 
 
-MAE_BUCKETS = (0.2, 0.5, 1.0, 3.0)
+STILL = "미동 확인봉"
 
 
-def tp_stats(signals, now_ms, days):
-    """v2.44 발송 신호의 신호 단위 결과(기록 끝난 것): TP 도달률, 평균 도달 시간,
-    MAE 분포, 되돌림 ✓/⚠️별 도달률."""
+def still_stats(signals, now_ms, days):
+    """v2.44 미동 억제 신호 건수와 그 결과(신호 단위 기록 — 보냈다면 어땠는지)."""
     since = now_ms - days * 86_400_000
-    w = [s for s in signals if s["bar_close_ms"] >= since and s.get("sent", True) and s.get("status") == "done"]
-    hit = [s for s in w if _is_tp(s)]
-    times = [s["result_ms"] - (s["bar_close_ms"] + 1) for s in hit if s.get("result_ms")]
-    buckets = [0] * (len(MAE_BUCKETS) + 1)
-    for s in w:
-        m = s.get("mae_pct") or 0.0
-        buckets[next((i for i, lim in enumerate(MAE_BUCKETS) if m <= lim), len(MAE_BUCKETS))] += 1
-
-    def rate(ok):
-        g = [s for s in w if s.get("pullback_ok") is ok]
-        return sum(1 for s in g if _is_tp(s)), len(g)
-
-    return {"n": len(w), "hit": len(hit), "avg_ms": sum(times) / len(times) if times else None,
-            "mae_buckets": buckets, "pb_ok": rate(True), "pb_warn": rate(False)}
+    w = [s for s in signals if s["bar_close_ms"] >= since and s.get("suppress_reason") == STILL]
+    done = [s for s in w if s.get("status") == "done"]
+    return {"n": len(w), "done": len(done), "tp": sum(1 for s in done if _is_tp(s))}
 
 
-def _rate(a, n):
-    return f"{a}/{n} ({a / n * 100:.0f}%)" if n else "0/0"
-
-
-def format_tp_lines(st):
-    avg = cp.fmt_dur(st["avg_ms"]) if st["avg_ms"] is not None else "—"
-    lims = [f"≤{x:g}%" for x in MAE_BUCKETS] + [f">{MAE_BUCKETS[-1]:g}%"]
-    return [
-        f"신호→TP {_rate(st['hit'], st['n'])} · 평균 도달 {avg}",
-        f"MAE 분포: " + " · ".join(f"{l} {c}" for l, c in zip(lims, st["mae_buckets"])),
-        f"되돌림 ✓ TP {_rate(*st['pb_ok'])} | ⚠️ TP {_rate(*st['pb_warn'])}",
-    ]
+def format_still_line(st):
+    if not st["n"]:
+        return "미동 억제 0건"
+    pend = st["n"] - st["done"]
+    return (f"미동 억제 {st['n']}건 → TP {cp.fmt_rate(st['tp'], st['done'])}"
+            + (f" (기록 중 {pend})" if pend else ""))
 
 
 def format_summary(signals, positions, now_ms, windows=(7, 30)):
+    """v2.44 요약: v2.44 포지션(고정 TP) 기준 + 미동 억제 + v2.44 이전 기록 분리."""
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
     lines = [f"📊 코인 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
     for days in windows:
         lines.append("")
-        lines += cp.format_position_summary(cp.summarize_positions(positions, now_ms, days), CONFIG["CLOUD_TF"])
-        c = signal_counts(signals, now_ms, days)
-        lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
-                     f"반대방향 보류 {c['opposite']}")
-        lines += format_tp_lines(tp_stats(signals, now_ms, days))
+        lines += cp.format_position_summary(cp.summarize_positions(positions, now_ms, days))
+        lines.append(format_still_line(still_stats(signals, now_ms, days)))
+        legacy = cp.format_legacy_line(cp.summarize_legacy(positions, now_ms, days),
+                                       sum(1 for s in signals if "tp" not in s and s.get("sent", True)
+                                           and s["bar_close_ms"] >= now_ms - days * 86_400_000))
+        if legacy:
+            lines.append(legacy)
     return "\n".join(lines)
 
 

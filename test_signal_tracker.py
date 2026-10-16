@@ -87,9 +87,9 @@ def test_signal_message_format():
     assert tr.format_signal_message(s).split("\n") == [
         "🔺 BTCUSDT 5m 롱 신호 08:05 UTC (17:05 KST / 21:05 NZ)",
         "진입 참고 82,050",
-        "목표 +0.5% → 82,460 (20배 ROI +10%)",
+        "TP +0.5% → 82,460 (20배 ROI +10%)",
         "참고 1m 직전 고점 82,300 (+0.30%)",
-        "청산가(10배 격리): 74,666 (−9.00%)",
+        "청산가(20배 격리): 78,358 (−4.50%)",
         "30m 구름: 위, 두께 1.5% → 롱 편",
         "2h RSI 38 ↓",
         "포지션 #P12 추가 2회차 (평단 81,100 → 81,153)",
@@ -97,7 +97,7 @@ def test_signal_message_format():
         "가격 기준: 현물",
     ]
     short = tr.format_signal_message(base_sig(tp=99.7, tp_pct=0.3)).split("\n")
-    assert "목표 −0.3% → 99.700 (20배 ROI +6%)" in short and "참고 1m 직전 저점 없음" in short
+    assert "TP −0.3% → 99.700 (20배 ROI +6%)" in short and "참고 1m 직전 저점 없음" in short
 
 
 def test_ingest_klines_451_reason_in_message(tmp_path):
@@ -113,8 +113,8 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     assert (sig["pullback_ok"], sig["ref_extreme"], sig["dist_pct"]) == (None, None, None)
     lines = sent[0].split("\n")
     assert lines[2:] == [
-        "목표 +0.5% → 81,260 (20배 ROI +10%)",
-        "청산가(10배 격리): 73,579 (−9.00%)",
+        "TP +0.5% → 81,260 (20배 ROI +10%)",
+        "청산가(20배 격리): 77,217 (−4.50%)",
         "30m 구름 —",
         "2h RSI —",
         "되돌림 —",
@@ -333,22 +333,6 @@ def test_suppressed_signal_is_not_cross_dup_reference(tmp_path, monkeypatch):
     assert a["suppressed"] and b["sent"] and not b["duplicate"] and len(sent) == 1
 
 
-# ── 요약 (v2.41: 포지션 기준 + 신호 한 줄) ──
-
-def test_signal_counts_line():
-    now = utc_ms(2026, 10, 16, 20, 0)
-    t = now - 86_400_000
-    sigs = [base_sig(bar_open_ms=t), base_sig(bar_open_ms=t, suppressed=True, sent=False),
-            base_sig(bar_open_ms=t, duplicate=True, sent=False),
-            base_sig(bar_open_ms=t, opposite_of=3, sent=False),
-            base_sig(bar_open_ms=now - 20 * 86_400_000)]
-    text = tr.format_summary(sigs, [], now)
-    lines = text.split("\n")
-    assert lines[0].startswith("📊 코인 요약 (")
-    assert "신호: 발송 1 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines
-    assert "신호: 발송 2 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines   # 30일
-
-
 # ── v2.43 신저점/신고점 경고 ──
 
 def test_pullback_check_message_and_fields(tmp_path):
@@ -379,22 +363,22 @@ def test_pullback_check_message_and_fields(tmp_path):
     assert len(sent) == 3                                                   # 경고여도 발송(억제 안 함)
 
 
-def test_summary_tp_rate_time_mae_and_pullback_split():
+def test_summary_still_suppressed_and_legacy_split():
     now = utc_ms(2026, 10, 16, 20, 0)
     t = now - 86_400_000
-    done = dict(bar_open_ms=t, status="done")
-    c = t + 299_999 + 1                                                  # 신호 시각(② 마감)
-    sigs = [base_sig(pullback_ok=True, result="hit_tp", result_ms=c + 30 * MIN, mae_pct=0.1, **done),
-            base_sig(pullback_ok=True, result="hit_tp", result_ms=c + 90 * MIN, mae_pct=0.4, **done),
-            base_sig(pullback_ok=True, result="expired", mae_pct=0.8, **done),
-            base_sig(pullback_ok=False, result="expired", mae_pct=4.0, **done),
-            base_sig(result="hit_target1", result_ms=c + 60 * MIN, mae_pct=2.0, **done),   # v2.44 이전 기록
-            base_sig(pullback_ok=False, bar_open_ms=t),                          # 기록 중 → 제외
-            base_sig(pullback_ok=False, sent=False, suppressed=True, result="hit_tp", **done)]  # 미발송 → 제외
-    lines = tr.format_summary(sigs, [], now).split("\n")
-    assert "신호→TP 3/5 (60%) · 평균 도달 1시간 0분" in lines
-    assert "MAE 분포: ≤0.2% 1 · ≤0.5% 1 · ≤1% 1 · ≤3% 1 · >3% 1" in lines
-    assert "되돌림 ✓ TP 2/3 (67%) | ⚠️ TP 0/1 (0%)" in lines
+    still = dict(bar_open_ms=t, suppressed=True, sent=False, suppress_reason="미동 확인봉")
+    sigs = [base_sig(status="done", result="hit_tp", **still),
+            base_sig(status="done", result="expired", **still),
+            base_sig(**still),                                             # 기록 중
+            base_sig(bar_open_ms=t)]                                       # 일반 발송
+    legacy = {k: v for k, v in base_sig(bar_open_ms=t).items() if k not in ("tp", "tp_pct")}
+    pos_legacy = {"opened_ms": t, "status": "closed", "result": "hit_target2", "result_pct": 1.0,
+                  "adds": [], "mae_pct": 0.1, "trimmed": False}
+    lines = tr.format_summary(sigs + [legacy], [pos_legacy], now).split("\n")
+    assert lines[0].startswith("📊 코인 요약 (")
+    assert "[최근 7일] 포지션 0 (TP 0 · 포기선 0 · 만료 0 / 보유 0)" in lines
+    assert "미동 억제 3건 → TP 1/2 (50%) (기록 중 1)" in lines
+    assert "v2.44 이전: 포지션 1 (목표2 1 · 포기선 0 · 만료 0 / 보유 0) · 발송 신호 1" in lines
 
 
 def test_webhook_pullback_uses_spot_converted_entry(tmp_path):

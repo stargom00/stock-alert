@@ -96,8 +96,8 @@ def test_ref_swing_most_recent_beyond_entry():
 
 
 def test_liquidation_price():
-    assert lv.liquidation_price("long", 100.0) == pytest.approx(91.0)
-    assert lv.liquidation_price("short", 100.0) == pytest.approx(109.0)
+    assert lv.liquidation_price("long", 100.0) == pytest.approx(95.5)     # v2.44 20배 격리 ∓4.5%
+    assert lv.liquidation_price("short", 100.0) == pytest.approx(104.5)
 
 
 # ── 이치모쿠 (작은 파라미터로 수작업 대조) ──

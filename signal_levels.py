@@ -71,8 +71,8 @@ CONFIG = {
     "WEBHOOK_ENABLED": _env_bool("COIN_WEBHOOK_ENABLED", "1"),  # A. 트레이딩뷰 Webhook
     # v2.44 목표 = 고정 TP(채널 방식). 스윙 목표1/2 계산 삭제
     "TP_PCT": _env_float("COIN_TP_PCT", "0.5"),                  # 진입가 ± 이 %
-    "TP_WEEKEND_PCT": _env_float("COIN_TP_WEEKEND_PCT", "0.3"),  # 신호 시각이 UTC 토·일이면
-    "TP_ROI_LEV": _env_float("COIN_TP_ROI_LEV", "20"),           # 메시지 ROI 환산 배율
+    "TP_PCT_WEEKEND": _env_float("COIN_TP_PCT_WEEKEND", "0.3"),  # 신호 시각이 UTC 토·일이면
+    "TP_ROI_LEV": _env_float("COIN_TP_ROI_LEV", "20"),           # 메시지 ROI·청산가 배율(격리)
     "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙 (참고 1m 직전 고점/저점)
     "LEVEL_LOOKBACK": _env_int("COIN_LEVEL_LOOKBACK", "200"),   # 스윙 탐색 봉 수
     # v2.44 알림 억제(저장·추적은 함): ② 확인봉 (고가−저가)/시가 < 이 % → "미동 확인봉"
@@ -93,7 +93,7 @@ CONFIG = {
     # 추적
     "EXPIRE_HOURS": _env_float("COIN_EXPIRE_HOURS", "24"),    # 신호 단위 기록(조용히)
     # v2.41 포지션(채널 방식, 손절 없음) — 봇은 주문 안 함, 가상 수량으로 추적만
-    "LIQ_PCT": _env_float("COIN_LIQ_PCT", "9"),                    # 청산가 참고: 10배 격리 ≈ 진입가 ∓9%
+    "LIQ_PCT": _env_float("COIN_LIQ_PCT", "4.5"),                  # 청산가 참고: 20배(TP_ROI_LEV) 격리 ≈ 진입가 ∓4.5%
     "ADD_THRESHOLD_PCT": _env_float("COIN_ADD_THRESHOLD_PCT", "0.5"),  # 평단 대비 이만큼 역행 중 같은 방향 신호 → 추가
     "MAX_ADDS": _env_int("COIN_MAX_ADDS", "2"),
     "ADD_QTY": _env_float("COIN_ADD_QTY", "1"),                    # 추가 1회 수량 (1차 = 1단위)
@@ -245,7 +245,7 @@ def find_swings(bars, k=None):
 def tp_pct_for(bar_close_ms):
     """v2.44 TP %. 신호 시각(② 마감)이 UTC 토·일이면 주말 값."""
     wd = datetime.fromtimestamp((bar_close_ms + 1) / 1000, timezone.utc).weekday()
-    return CONFIG["TP_WEEKEND_PCT"] if wd >= 5 else CONFIG["TP_PCT"]
+    return CONFIG["TP_PCT_WEEKEND"] if wd >= 5 else CONFIG["TP_PCT"]
 
 
 def tp_price(side, entry, pct):
@@ -269,7 +269,8 @@ def bar_range_pct(b):
 
 
 def liquidation_price(side, entry, pct=None):
-    """v2.41 청산가 참고(격리 10배 기준 진입가 ∓LIQ_PCT%). 롱은 아래, 숏은 위."""
+    """v2.41 청산가 참고(격리, 진입가 ∓LIQ_PCT%). 롱은 아래, 숏은 위.
+    v2.44: 배율은 TP_ROI_LEV(20배)와 통일, 기본 4.5%."""
     pct = CONFIG["LIQ_PCT"] if pct is None else pct
     return entry * (1 - pct / 100.0) if side == "long" else entry * (1 + pct / 100.0)
 

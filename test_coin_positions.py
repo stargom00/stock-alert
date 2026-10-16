@@ -147,45 +147,50 @@ def test_catch_up_closes_then_new_position(pp):
     assert msgs == ["#P1 포기선 (−3.00%)"] and (a, pid) == ("new", 2)
 
 
-def test_position_summary():
+def test_position_tp_close(pp):
+    # 숏 100, TP 99.5: 99.6까지는 보유, 99.5 닿는 봉에서 전량 종료
+    cp.on_signal(sig(1, "short", 100.0, T0, 99.5), no_bars, path=pp)
+    sent = []
+    cp.track_positions(sent.append, lambda *a, **kw: [bar(1, 100.2, 99.6), bar(65, 99.9, 99.45)], path=pp, now_ms=FAR)
+    p = cp.load_positions(pp)[0]
+    assert sent == ["#P1 종료 TP (+0.50%, 1시간 5분)"]
+    assert (p["status"], p["result"], p["result_pct"]) == ("closed", "hit_tp", pytest.approx(0.5))
+    assert [r["qty"] for r in p["realized"]] == [1.0]                    # 분할 없이 전량
+    assert p["mae_pct"] == pytest.approx(0.2)
+
+
+def test_position_summary_v244_and_legacy_split():
     now = T0 + 86_400_000
 
-    def P(result, pct, adds, bias, mae, trimmed=False, status="closed"):
-        return {"opened_ms": T0, "status": status, "result": result, "result_pct": pct,
-                "adds": [{}] * adds, "cloud_bias": bias, "mae_pct": mae, "trimmed": trimmed}
+    def P(result, pct, adds, pb, mae, hours=1, status="closed", legacy=False):
+        p = {"opened_ms": T0, "closed_ms": T0 + hours * 3_600_000 if status == "closed" else None,
+             "status": status, "result": result, "result_pct": pct, "adds": [{}] * adds,
+             "pullback_ok": pb, "mae_pct": mae, "trimmed": False}
+        if not legacy:
+            p["tp"] = 1.0
+        return p
 
-    # 두 번째 TP는 v2.44 이전 기록(hit_target2) — TP로 셈
-    ps = [P("hit_tp", 1.0, 0, "편", 0.2), P("giveup", -3.0, 2, "역", 3.0, trimmed=False),
-          P("hit_target2", 0.6, 1, "편", 0.8, trimmed=True), P("expired", -0.2, 0, None, 0.4),
-          P(None, None, 0, "편", 0.1, status="open")]
+    ps = [P("hit_tp", 0.5, 0, True, 0.2, hours=1), P("hit_tp", 0.5, 1, False, 0.8, hours=3),
+          P("giveup", -3.0, 2, False, 3.0), P("expired", -0.2, 0, True, 0.4),
+          P(None, None, 0, None, 0.6, status="open"),
+          P("hit_target2", 1.0, 0, None, 0.1, legacy=True), P(None, None, 0, None, 0.1, status="open", legacy=True)]
     s = cp.summarize_positions(ps, now, 7)
-    assert s["by_result"] == {"hit_tp": 2, "giveup": 1, "expired": 1}
-    assert s["avg_result"] == pytest.approx((1.0 - 3.0 + 0.6 - 0.2) / 4)
-    assert s["with_adds"] == (pytest.approx(-1.2), 2) and s["no_adds"] == (pytest.approx(0.4), 2)
-    assert s["max_mae"] == 3.0
+    assert (s["n"], s["by_result"]) == (5, {"hit_tp": 2, "giveup": 1, "expired": 1})   # 이전 기록 제외
     assert cp.format_position_summary(s) == [
-        "[최근 7일] 포지션 5 (종료 4: TP 2 · 포기선 1 · 만료 1 / 보유 1)",
-        "평균 결과 −0.40% · 최대 MAE −3.00%",
-        "종료 결과 — 추가 있음: −1.20% (2건) · 없음: +0.40% (2건)",
-        "보유 포함 — 추가 2건 · 덜어내기 1건",
-        "30m 구름 편: +0.80% (2건) · 역: −3.00% (1건)",
+        "[최근 7일] 포지션 5 (TP 2 · 포기선 1 · 만료 1 / 보유 1)",
+        "TP까지 평균 2시간 0분 · MAE −0.50% 넘음 3/5",
+        "추가 있음 TP 1/2 (50%) · 평균 −1.25% | 없음 TP 1/2 (50%) · 평균 +0.15%",
+        "되돌림 ✓ TP 1/2 (50%) | ⚠️ TP 1/2 (50%)",
     ]
+    assert cp.format_legacy_line(cp.summarize_legacy(ps, now, 7), 3) == \
+        "v2.44 이전: 포지션 2 (목표2 1 · 포기선 0 · 만료 0 / 보유 1) · 발송 신호 3"
+    assert cp.format_legacy_line(cp.summarize_legacy([], now, 7), 0) is None
 
 
-def test_summary_open_trimmed_position_counts_consistent(pp):
-    # 실제 경로 재현: 1차 → 역행 추가 → 평단 복귀 덜어내기 → 아직 보유 중 + 추가 없이 종료된 포지션 1개
-    cp.on_signal(sig(1, "long", 100.0, T0), no_bars, path=pp)
-    assert cp.on_signal(sig(2, "long", 99.4, T0 + 5 * MIN), no_bars, path=pp)[0] == "add"
-    cp.track_positions(lambda m: None, lambda *a, **kw: [bar(6, 99.8, 99.5)], path=pp, now_ms=T0 + 7 * MIN)
-    ps = cp.load_positions(pp)
-    assert ps[0]["trimmed"] and ps[0]["adds"] and ps[0]["status"] == "open"
-    ps.append({"id": 2, "opened_ms": T0, "status": "closed", "result": "giveup", "result_pct": -3.0,
-               "adds": [], "cloud_bias": None, "mae_pct": 3.0, "trimmed": False})
-    s = cp.summarize_positions(ps, T0 + 3_600_000, 7)
-    assert s["trims"] <= s["adds_n"]                    # 덜어내기는 추가분이 있어야만 생김
-    lines = cp.format_position_summary(s)
-    assert "보유 포함 — 추가 1건 · 덜어내기 1건" in lines
-    assert "종료 결과 — 추가 있음: — (0건) · 없음: −3.00% (1건)" in lines
+def test_new_position_keeps_first_signal_pullback(pp):
+    s1 = dict(sig(1, "long", 100.0, T0, 100.5), pullback_ok=False)
+    cp.on_signal(s1, no_bars, path=pp)
+    assert cp.load_positions(pp)[0]["pullback_ok"] is False
 
 
 def test_legacy_position_without_tp_uses_target2(pp):

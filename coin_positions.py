@@ -142,6 +142,7 @@ def new_position(positions, sig):
         "opened_ms": ms, "closed_ms": None, "signal_ids": [sig["id"]],
         "entry1": sig["entry"], "tp": sig.get("tp"), "tp_pct": sig.get("tp_pct"),
         "cloud_bias": (sig.get("cloud") or {}).get("bias"),
+        "pullback_ok": sig.get("pullback_ok"),       # v2.44 1차 신호의 되돌림 ✓/⚠️ (요약 분해용)
         "qty": 1.0, "avg": sig["entry"], "adds": [], "trimmed": False,
         "realized": [], "events": [],
         "checked_until_ms": sig["bar_close_ms"], "last_close": None,
@@ -314,45 +315,72 @@ def _avg(xs):
     return sum(xs) / len(xs) if xs else None
 
 
-def _result(p):
-    return "hit_tp" if p["result"] == "hit_target2" else p["result"]   # v2.44 이전 목표2 종료 = TP
+MAE_FLAG_PCT = 0.5     # 요약: 평단 대비 이 % 넘게 역행한 포지션 수
+
+
+def is_v244(p):
+    """v2.44(고정 TP) 포지션. 이전 포지션(목표1/2)은 요약에서 분리."""
+    return "tp" in p
+
+
+def fmt_rate(a, n):
+    return f"{a}/{n} ({a / n * 100:.0f}%)" if n else "0/0"
+
+
+def _window(positions, now_ms, days):
+    since = now_ms - days * 86_400_000
+    return [p for p in positions if p["opened_ms"] >= since]
 
 
 def summarize_positions(positions, now_ms, days):
-    since = now_ms - days * 86_400_000
-    sub = [p for p in positions if p["opened_ms"] >= since]
+    """v2.44 포지션만(고정 TP). 결과 비교는 종료된 것, MAE 건수는 보유 포함."""
+    sub = [p for p in _window(positions, now_ms, days) if is_v244(p)]
     closed = [p for p in sub if p["status"] == "closed"]
 
-    def res(ps):
-        return _avg(p["result_pct"] for p in ps), len(ps)
+    def grp(ps):
+        return {"n": len(ps), "tp": sum(1 for p in ps if p["result"] == "hit_tp"),
+                "avg": _avg(p["result_pct"] for p in ps)}
 
+    tp_ms = [p["closed_ms"] - p["opened_ms"] for p in closed if p["result"] == "hit_tp"]
     return {
         "days": days, "n": len(sub), "closed": len(closed), "open": len(sub) - len(closed),
-        "by_result": {k: sum(1 for p in closed if _result(p) == k)
-                      for k in ("hit_tp", "giveup", "expired")},
-        "avg_result": _avg(p["result_pct"] for p in closed),
-        "with_adds": res([p for p in closed if p["adds"]]),
-        "no_adds": res([p for p in closed if not p["adds"]]),
-        # v2.42.1: 건수(추가·덜어내기)는 보유 중 포함 같은 범위로 셈. 결과 % 비교만 종료 기준.
-        # (예전엔 추가 있음이 종료만, 덜어내기는 보유 포함이라 "추가 0건 · 덜어내기 1건"이 나옴)
-        "adds_n": sum(1 for p in sub if p["adds"]),
-        "trims": sum(1 for p in sub if p["trimmed"]),
-        "max_mae": max((p["mae_pct"] for p in sub), default=None),
-        "cloud_with": res([p for p in closed if p.get("cloud_bias") == "편"]),
-        "cloud_against": res([p for p in closed if p.get("cloud_bias") == "역"]),
+        "by_result": {k: sum(1 for p in closed if p["result"] == k) for k in ("hit_tp", "giveup", "expired")},
+        "tp_avg_ms": _avg(tp_ms),
+        "mae_over": sum(1 for p in sub if p["mae_pct"] > MAE_FLAG_PCT),
+        "with_adds": grp([p for p in closed if p["adds"]]),
+        "no_adds": grp([p for p in closed if not p["adds"]]),
+        "pb_ok": grp([p for p in closed if p.get("pullback_ok") is True]),
+        "pb_warn": grp([p for p in closed if p.get("pullback_ok") is False]),
     }
 
 
-def format_position_summary(s, cloud_tf="30m"):
+def format_position_summary(s):
     br = s["by_result"]
-    lines = [f"[최근 {s['days']}일] 포지션 {s['n']} (종료 {s['closed']}: TP {br['hit_tp']} · "
-             f"포기선 {br['giveup']} · 만료 {br['expired']} / 보유 {s['open']})"]
+    lines = [f"[최근 {s['days']}일] 포지션 {s['n']} (TP {br['hit_tp']} · 포기선 {br['giveup']} · "
+             f"만료 {br['expired']} / 보유 {s['open']})"]
     if s["n"]:
-        lines.append(f"평균 결과 {fmt_pct(s['avg_result'])} · 최대 MAE "
-                     f"{fmt_pct(-s['max_mae']) if s['max_mae'] is not None else '—'}")
-        lines.append(f"종료 결과 — 추가 있음: {fmt_pct(s['with_adds'][0])} ({s['with_adds'][1]}건) · "
-                     f"없음: {fmt_pct(s['no_adds'][0])} ({s['no_adds'][1]}건)")
-        lines.append(f"보유 포함 — 추가 {s['adds_n']}건 · 덜어내기 {s['trims']}건")
-        lines.append(f"{cloud_tf} 구름 편: {fmt_pct(s['cloud_with'][0])} ({s['cloud_with'][1]}건) · "
-                     f"역: {fmt_pct(s['cloud_against'][0])} ({s['cloud_against'][1]}건)")
+        avg = fmt_dur(s["tp_avg_ms"]) if s["tp_avg_ms"] is not None else "—"
+        lines.append(f"TP까지 평균 {avg} · MAE {fmt_pct(-MAE_FLAG_PCT)} 넘음 {s['mae_over']}/{s['n']}")
+        wa, na = s["with_adds"], s["no_adds"]
+        lines.append(f"추가 있음 TP {fmt_rate(wa['tp'], wa['n'])} · 평균 {fmt_pct(wa['avg'])} | "
+                     f"없음 TP {fmt_rate(na['tp'], na['n'])} · 평균 {fmt_pct(na['avg'])}")
+        lines.append(f"되돌림 ✓ TP {fmt_rate(s['pb_ok']['tp'], s['pb_ok']['n'])} | "
+                     f"⚠️ TP {fmt_rate(s['pb_warn']['tp'], s['pb_warn']['n'])}")
     return lines
+
+
+def summarize_legacy(positions, now_ms, days):
+    sub = [p for p in _window(positions, now_ms, days) if not is_v244(p)]
+    closed = [p for p in sub if p["status"] == "closed"]
+    return {"n": len(sub), "open": len(sub) - len(closed),
+            "by_result": {k: sum(1 for p in closed if p["result"] == k)
+                          for k in ("hit_target2", "giveup", "expired")}}
+
+
+def format_legacy_line(s, n_signals):
+    """v2.44 이전(목표1/2) 기록 분리 한 줄. 없으면 None."""
+    if not s["n"] and not n_signals:
+        return None
+    br = s["by_result"]
+    return (f"v2.44 이전: 포지션 {s['n']} (목표2 {br['hit_target2']} · 포기선 {br['giveup']} · "
+            f"만료 {br['expired']} / 보유 {s['open']}) · 발송 신호 {n_signals}")
