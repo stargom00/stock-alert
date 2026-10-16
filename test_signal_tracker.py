@@ -140,9 +140,10 @@ def test_ingest_dedup_n_bars(tmp_path):
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, t0, "self", sent.append, _fake_fetch_levels, p) is None
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 11 * 300_000, "self", sent.append, _fake_fetch_levels, p) is None
     opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
-    assert opp["id"] == 2 and opp["opposite_of"] == 1 and not opp["sent"]   # v2.41 반대 방향 = 저장만
+    assert opp["id"] == 2 and opp["opposite_of"] == 1 and not opp["sent"]   # v2.41 반대 방향 = 신호는 저장만
+    assert sent[-1] == "#P1 반대 신호 #0002 발생 (보유 중)"                   # v2.42 포지션 메시지 한 줄
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
-    assert len(sent) == 2
+    assert len(sent) == 3
     saved = tr.load_signals(p)
     assert [s["source"] for s in saved] == ["webhook", "self", "self"]
     assert saved[0]["status"] == "open" and saved[0]["target1"] is None
@@ -268,15 +269,47 @@ def test_cross_tf_duplicate(tmp_path, monkeypatch):
     # 1m ② 마감 08:15 = 5m 마감 08:05 + 10분 → 중복
     b = tr.ingest_signal("BTCUSDT", "1m", "short", 100.0, utc_ms(2026, 10, 16, 8, 14), "self", sent.append, path=p)
     assert (b["duplicate"], b["dup_of"], b["sent"], b["position_id"]) == (True, a["id"], False, None)
-    # 반대: 1m 발송 뒤 10분 안 5m → 중복
+    # v2.42 반대 순서: 1m 발송 뒤 10분 안 5m → 중복 아님, 확인 신호로 발송
     d = tr.ingest_signal("ETHUSDT", "1m", "long", 10.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
     e = tr.ingest_signal("ETHUSDT", "5m", "long", 10.0, utc_ms(2026, 10, 16, 9, 5), "self", sent.append, path=p)
-    assert d["sent"] and (e["duplicate"], e["dup_of"]) == (True, d["id"])
+    assert d["sent"] and e["sent"] and not e["duplicate"]
+    assert (e["confirm_of"], e["position_id"]) == (d["id"], d["position_id"])
     # 10분 초과면 중복 아님 (1m 마감 09:01, 5m 마감 09:15 → 14분)
     g = tr.ingest_signal("SOLUSDT", "1m", "short", 1.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append, path=p)
     h = tr.ingest_signal("SOLUSDT", "5m", "short", 1.0, utc_ms(2026, 10, 16, 9, 10), "self", sent.append, path=p)
     assert g["sent"] and h["sent"] and not h["duplicate"]
-    assert len(sent) == 4
+    assert len(sent) == 5
+
+
+def test_1m_then_5m_confirm_retargets_position(tmp_path, monkeypatch):
+    p, pp = str(tmp_path / "s.json"), str(tmp_path / "positions.json")
+    ctxs = iter([_ctx(target1=100.2, target2=100.3), _ctx(target1=100.5, target2=101.0)])
+    monkeypatch.setattr(tr.lv, "build_signal_context", lambda *a, **kw: next(ctxs))
+    sent = []
+    for _ in range(19):     # 신호ID #0020이 되도록 다른 심볼로 채움(저장만)
+        tr.save_signals(tr.load_signals(p) + [base_sig(id=len(tr.load_signals(p)) + 1, symbol="XRPUSDT",
+                                                       sent=False)], p)
+    cp = tr.cp
+    for i in range(5):      # #P6이 되도록 종료된 포지션 5개
+        cp.save_positions(cp.load_positions(pp) + [{"id": i + 1, "symbol": "BTCUSDT", "status": "closed"}], pp)
+    a = tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, utc_ms(2026, 10, 16, 9, 0), "self", sent.append,
+                         fetch=lambda *a, **kw: [], path=p, pos_path=pp)
+    assert (a["id"], a["position_id"], a["position_note"]) == (20, 6, "포지션: 신규 1차 #P6")
+    # 5m ② 마감 09:05 (1m 마감 09:01 + 4분)
+    b = tr.ingest_signal("BTCUSDT", "5m", "long", 100.1, utc_ms(2026, 10, 16, 9, 0), "self", sent.append,
+                         fetch=lambda *a, **kw: [], path=p, pos_path=pp)
+    assert b["sent"] and not b["duplicate"]
+    assert (b["confirm_of"], b["position_id"], b["position_action"]) == (20, 6, "confirm")
+    assert "1m #0020 → 5m 확인 (목표 상향)" in sent[-1].split("\n")
+    assert "포지션" not in sent[-1]                       # 추가·보유 줄 대신 확인 줄
+    pos = [x for x in cp.load_positions(pp) if x["id"] == 6][0]
+    assert (pos["target1"], pos["target2"], pos["qty"], pos["signal_ids"]) == (100.5, 101.0, 1.0, [20, 21])
+    assert pos["events"][-1]["kind"] == "retarget"
+    # 반대 순서(5m 먼저, 1m 뒤)는 기존대로 1m 중복
+    c = tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, utc_ms(2026, 10, 16, 9, 7), "self", sent.append,
+                         fetch=lambda *a, **kw: [], path=p, pos_path=pp)
+    assert c is None or (c["duplicate"] and not c["sent"])
+    assert len(sent) == 2
 
 
 def test_suppressed_signal_is_not_cross_dup_reference(tmp_path, monkeypatch):

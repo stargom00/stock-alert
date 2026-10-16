@@ -218,6 +218,34 @@ def test_target2_falls_back_to_window_extreme():
     assert lv_["src"]["target2"] == "extreme"
 
 
+def test_target2_min_gap_next_swing_or_gap_fix():
+    # 스윙 저점 99.0·98.95(목표1 대비 0.05% — 너무 가까움)·98.0
+    l = [100.2, 100.1, 100.0, 99.0, 100.0, 100.1, 100.2, 98.95, 100.2, 100.3, 100.2, 98.0, 100.2, 100.3, 100.4, 100.5]
+    bars = [B(x + 0.3, x) for x in l]
+    lv_ = lv.compute_levels(bars, "short", 100.0, k=3, pad_pct=0, min_dist_pct=0.15, gap_pct=0.1)
+    assert (lv_["target1"], lv_["target2"]) == (99.0, 98.0)          # 98.95 건너뛰고 다음 스윙
+    assert lv_["src"]["target2"] == "swing"
+    # 98.0 스윙이 없고 남은 후보(98.95, 극값 98.95)가 전부 가까우면 → 목표1 −0.1% (간격 보정)
+    l2 = l[:11] + [100.1] + l[12:]
+    lv_ = lv.compute_levels([B(x + 0.3, x) for x in l2], "short", 100.0, k=3, pad_pct=0,
+                            min_dist_pct=0.15, extreme_pad_pct=0, gap_pct=0.1)
+    assert lv_["target1"] == 99.0 and lv_["target2"] == pytest.approx(99.0 * 0.999)
+    assert lv_["src"]["target2"] == "gap_fix"
+    # 롱 대칭
+    lv_ = lv.compute_levels([B(200 - x, 199.7 - x) for x in l2], "long", 100.0, k=3, pad_pct=0,
+                            min_dist_pct=0.15, extreme_pad_pct=0, gap_pct=0.1)
+    assert lv_["target1"] == pytest.approx(101.0) and lv_["target2"] == pytest.approx(101.0 * 1.001)
+    assert lv_["src"]["target2"] == "gap_fix"
+
+
+def test_gap_fix_shown_in_message():
+    sig = {"id": 1, "symbol": "BTCUSDT", "tf": "5m", "side": "short", "entry": 100.0,
+           "bar_close_ms": 1792051499999, "target1": 99.0, "target2": 98.901,
+           "level_src": {"target1": "swing", "target2": "gap_fix"}, "cloud": None, "htf_rsi": None}
+    import signal_tracker as tr
+    assert "목표2 98.901 (−1.10%) (간격 보정)" in tr.format_signal_message(sig).split("\n")
+
+
 def test_long_min_dist_mirror():
     bars = [B(200 - b["l"], 200 - b["h"]) for b in MIN_BARS]
     lv_ = lv.compute_levels(bars, "long", 100.0, k=3, pad_pct=0.05, min_dist_pct=0.15)

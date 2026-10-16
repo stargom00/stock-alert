@@ -134,10 +134,11 @@ def test_expire_72h(pp):
 
 def test_opposite_signal_no_position_action(pp):
     cp.on_signal(sig(1, "long", 100.0, T0), no_bars, path=pp)
-    a, line, _, pid = cp.on_signal(sig(2, "short", 101.0, T0 + 5 * MIN), no_bars, path=pp)
-    assert (a, line, pid) == ("opposite", None, 1)
+    a, line, _, pid = cp.on_signal(sig(14, "short", 101.0, T0 + 5 * MIN), no_bars, path=pp)
+    assert (a, line, pid) == ("opposite", "#P1 반대 신호 #0014 발생 (보유 중)", 1)   # v2.42 알림 한 줄
     ps = cp.load_positions(pp)
-    assert len(ps) == 1 and ps[0]["signal_ids"] == [1]
+    assert len(ps) == 1 and ps[0]["signal_ids"] == [1] and ps[0]["qty"] == 1.0
+    assert (ps[0]["events"][-1]["kind"], ps[0]["events"][-1]["signal_id"]) == ("opposite_signal", 14)
 
 
 def test_catch_up_closes_then_new_position(pp):

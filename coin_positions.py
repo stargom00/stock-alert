@@ -239,11 +239,14 @@ def update_position(pos, bars, now_ms, until_ms=None):
     return msgs
 
 
-def on_signal(sig, fetch, path=None, now_ms=None):
+def on_signal(sig, fetch, path=None, now_ms=None, bind_pid=None):
     """발송 대상 신호 1건을 포지션에 반영.
-    반환 (action, line, msgs): action = "new"/"add"/"hold"/"opposite",
-    line = 신호 메시지에 넣을 포지션 줄(opposite면 None), msgs = 신호 직전까지
-    따라잡기 추적에서 생긴 이벤트 줄(신호보다 먼저 발송)."""
+    반환 (action, line, msgs, pid): action = "new"/"add"/"hold"/"opposite"/"confirm",
+    line = 신호 메시지에 넣을 포지션 줄(opposite면 따로 보낼 포지션 메시지 한 줄,
+    confirm이면 None), msgs = 신호 직전까지 따라잡기 추적에서 생긴 이벤트 줄
+    (신호보다 먼저 발송).
+    v2.42 bind_pid: 1m → 5m 확인 신호. 그 포지션이 아직 열려 있으면 추가 없이
+    묶고 목표1/2를 이 신호 값으로 갱신(값이 없는 쪽은 유지)."""
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     msgs = []
     with _lock:
@@ -262,7 +265,20 @@ def on_signal(sig, fetch, path=None, now_ms=None):
             pos = new_position(positions, sig)
             action, line = "new", f"포지션: 신규 1차 #P{pos['id']}"
         elif pos["side"] != sig["side"]:
-            action, line = "opposite", None
+            action = "opposite"
+            line = f"#P{pos['id']} 반대 신호 #{sig['id']:04d} 발생 (보유 중)"
+            _event(pos, sig["bar_close_ms"] + 1, "opposite_signal", sig["entry"])
+            pos["events"][-1]["signal_id"] = sig["id"]
+        elif bind_pid is not None and pos["id"] == bind_pid:
+            action, line = "confirm", None
+            old = (pos.get("target1"), pos.get("target2"))
+            for key in ("target1", "target2"):
+                if sig.get(key) is not None:
+                    pos[key] = sig[key]
+            pos["signal_ids"].append(sig["id"])
+            _event(pos, sig["bar_close_ms"] + 1, "retarget", sig["entry"])
+            pos["events"][-1].update(signal_id=sig["id"], old_targets=list(old),
+                                     targets=[pos.get("target1"), pos.get("target2")])
         else:
             added, line = try_add(pos, sig)
             action = "add" if added else "hold"

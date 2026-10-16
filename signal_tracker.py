@@ -129,8 +129,11 @@ def format_signal_message(sig):
                 lines.append(f"{label} 없음")
                 continue
             line = f"{label} {fmt_px(v)} ({fmt_pct(_pct_from(entry, v))})"
-            if (sig.get("level_src") or {}).get(key) == "extreme":
+            src = (sig.get("level_src") or {}).get(key)
+            if src == "extreme":
                 line += " 구간 극값"
+            elif src == "gap_fix":
+                line += " (간격 보정)"
             lines.append(line)
     # v2.41: 손절·손익비 대신 청산가 참고(채널 방식 — 강제청산 리스크만 관리)
     liq = lv.liquidation_price(sig["side"], entry)
@@ -154,6 +157,8 @@ def format_signal_message(sig):
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
         lines.append(f"⚠️ {'·'.join(what)} 조회 실패: {reason}")
+    if sig.get("confirm_note"):
+        lines.append(sig["confirm_note"])
     if sig.get("position_note"):
         lines.append(sig["position_note"])
     lines.append(f"신호ID #{sig['id']:04d}")
@@ -181,15 +186,33 @@ def suppress_reason(entry, target1):
     return None
 
 
+def _cross_tf_refs(signals, symbol, tf, side, bar_close_ms):
+    win = CONFIG["CROSS_DUP_MIN"] * MIN_MS
+    return [s for s in reversed(signals)
+            if s["symbol"] == symbol and s["side"] == side and s["tf"] != tf
+            and s.get("sent", True) and abs(bar_close_ms - s["bar_close_ms"]) <= win]
+
+
+def _is_confirm(ref, tf, bar_close_ms):
+    """짧은 주기(1m) 발송 뒤 긴 주기(5m)가 같은 방향으로 뜬 경우."""
+    return TF_MS[tf] > TF_MS[ref["tf"]] and ref["bar_close_ms"] <= bar_close_ms
+
+
 def cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms):
     """v2.40 다른 주기·같은 심볼·같은 방향으로 실제 발송된 신호가 신호 시각 기준
-    CROSS_DUP_MIN분 이내(앞뒤)에 있으면 그 신호 id, 없으면 None."""
-    win = CONFIG["CROSS_DUP_MIN"] * MIN_MS
-    for s in reversed(signals):
-        if (s["symbol"] == symbol and s["side"] == side and s["tf"] != tf
-                and s.get("sent", True) and abs(bar_close_ms - s["bar_close_ms"]) <= win):
+    CROSS_DUP_MIN분 이내(앞뒤)에 있으면 그 신호 id, 없으면 None.
+    v2.42: 짧은 주기 신호 뒤의 긴 주기 신호(1m → 5m)는 중복이 아니라 확인
+    (cross_tf_confirm). 반대 순서(5m → 1m)는 그대로 중복."""
+    for s in _cross_tf_refs(signals, symbol, tf, side, bar_close_ms):
+        if not _is_confirm(s, tf, bar_close_ms):
             return s["id"]
     return None
+
+
+def cross_tf_confirm(signals, symbol, tf, side, bar_close_ms):
+    """v2.42 확인 대상인 짧은 주기 발송 신호(가장 최근) 또는 None."""
+    return next((s for s in _cross_tf_refs(signals, symbol, tf, side, bar_close_ms)
+                 if _is_confirm(s, tf, bar_close_ms)), None)
 
 
 def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
@@ -212,6 +235,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             return None
         sup = suppress_reason(entry, ctx["target1"])
         dup_of = cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms)
+        ref = cross_tf_confirm(signals, symbol, tf, side, bar_close_ms) if dup_of is None else None
         sig = {
             "id": max((s["id"] for s in signals), default=0) + 1,
             "time": datetime.fromtimestamp((bar_close_ms + 1) / 1000, timezone.utc).isoformat(),
@@ -230,6 +254,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "duplicate": dup_of is not None, "dup_of": dup_of,
             "sent": sup is None and dup_of is None,
             "opposite_of": None, "position_id": None, "position_action": None, "position_note": None,
+            "confirm_of": None, "confirm_note": None,
             # 추적 상태
             "status": "open", "phase": "pre_t1", "result": None,
             "checked_until_ms": bar_close_ms, "bars": 0,
@@ -239,14 +264,27 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "result_ms": None, "result_bars": None, "result_pct": None, "after_t1": None,
         }
         pre_msgs = []
+        pos_msgs = []
         if sig["sent"]:
-            action, line, pre_msgs, pid = cp.on_signal(sig, fetch, path=pos_path, now_ms=now_ms)
+            bind = ref.get("position_id") if ref else None
+            action, line, pre_msgs, pid = cp.on_signal(sig, fetch, path=pos_path, now_ms=now_ms,
+                                                       bind_pid=bind)
             sig.update(position_id=pid, position_action=action, position_note=line)
+            if ref is not None:
+                sig["confirm_of"] = ref["id"]
+                sig["confirm_note"] = f"{ref['tf']} #{ref['id']:04d} → {tf} 확인" + \
+                    (" (목표 상향)" if action == "confirm" else "")
+                if action == "confirm":
+                    sig["position_note"] = None      # 확인 줄이 포지션 줄을 대신함
             if action == "opposite":
-                sig.update(sent=False, opposite_of=pid)
+                # v2.42: 신호 메시지는 안 보내고 포지션 메시지로 한 줄 알림
+                sig.update(sent=False, opposite_of=pid, position_note=None)
+                pos_msgs.append(line)
         signals.append(sig)
         save_signals(signals, path)
     for m in pre_msgs:          # 신호 직전까지 따라잡기에서 생긴 포지션 이벤트
+        send(m)
+    for m in pos_msgs:
         send(m)
     if sig["sent"]:
         send(format_signal_message(sig))
