@@ -387,3 +387,25 @@ def test_summary_pullback_breakdown_line():
             base_sig(**done)]                                                    # v2.43 이전 → 제외
     lines = tr.format_summary(sigs, [], now).split("\n")
     assert "되돌림 ✓ 2건: 목표1 1/2 · 평균 +0.10% · MAE −0.30% | ⚠️ 1건: 목표1 0/1 · 평균 −0.80% · MAE −1.20%" in lines
+
+
+def test_webhook_pullback_uses_spot_converted_entry(tmp_path):
+    t0 = utc_ms(2026, 10, 16, 8, 0)
+    # 5m 현물 24봉: 최저 81,400. 신호 봉(07:55~08:00) 현물 종가 81,450 (+0.06%)
+    bars5 = [{"t": t0 - (24 - i) * 300_000, "T": t0 - (23 - i) * 300_000 - 1, "o": 81600.0, "h": 81900.0,
+              "l": 81400.0 if i == 10 else 81500.0, "c": 81450.0 if i == 23 else 81600.0} for i in range(24)]
+
+    def fetch(symbol, tf, limit=500, end_ms=None, start_ms=None):
+        return bars5 if tf == "5m" else []
+
+    sent = []
+    p = str(tmp_path / "s.json")
+    # 선물 진입 81,540(현물보다 +0.11%) — 선물가로 비교하면 되돌림 ✓로 잘못 나옴
+    w = tr.ingest_signal("BTCUSDT", "5m", "long", 81_540.0, t0 - 300_000, "webhook", sent.append, fetch, p)
+    assert (w["entry"], w["entry_spot"]) == (81_540.0, 81_450.0)
+    assert w["pullback_ok"] is False and w["dist_pct"] == pytest.approx(50 / 81_400 * 100)
+    assert "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)" in sent[-1].split("\n")
+    assert "진입 참고 81,540" in sent[-1].split("\n")                     # 표시·포지션은 선물가 그대로
+    # 자체 판정(현물 진입가)은 환산 안 함
+    s_ = tr.ingest_signal("ETHUSDT", "5m", "long", 81_540.0, t0 - 300_000, "self", sent.append, fetch, p)
+    assert s_["entry_spot"] is None and s_["pullback_ok"] is True

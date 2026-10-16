@@ -249,7 +249,8 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         if is_duplicate(signals, symbol, tf, side, bar_open_ms):
             print(f"[코인신호] 중복 무시 {symbol} {tf} {side} {bar_open_ms} ({source})")
             return None
-    ctx = lv.build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch)
+    ctx = lv.build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch,
+                                  spot_entry=(source == "webhook"))
     for k, e in ctx["errors"].items():
         print(f"[코인신호] {symbol} {tf} {k} 실패: {e}")
     with _lock:
@@ -273,6 +274,8 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "pullback_ok": (ctx.get("pullback") or {}).get("pullback_ok"),
             "ref_extreme": (ctx.get("pullback") or {}).get("ref_extreme"),
             "dist_pct": (ctx.get("pullback") or {}).get("dist_pct"),
+            # v2.43.1 되돌림 비교에 쓴 현물 환산가(Webhook만, entry는 원래 선물가 그대로)
+            "entry_spot": ctx.get("entry_spot"),
             "source": source,
             "errors": ctx["errors"], "price_basis": lv.price_basis(),
             "level_src": ctx.get("src") or {},

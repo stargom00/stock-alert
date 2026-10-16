@@ -372,12 +372,17 @@ def pullback_check(bars, side, entry, n=None, min_pct=None):
     return {"pullback_ok": dist >= min_pct - 1e-9, "ref_extreme": ref, "dist_pct": dist}
 
 
-def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines):
+def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
-    나머지는 계속 계산(알림 자체는 나가게)."""
+    나머지는 계속 계산(알림 자체는 나가게).
+    v2.43.1 spot_entry(Webhook = 선물 진입가): 되돌림 판정만 현물 환산가로 비교.
+    환산가 = 신호 봉 마감 시각의 현물 5m 종가(이미 받은 5m 봉). 5m 봉이 그 시각에
+    안 끝나면(1m 신호 대부분) 이미 받은 신호 주기 현물 봉의 종가. 둘 다 없으면
+    선물가 그대로 비교하고 entry_spot = None."""
     out = {"target1": None, "target2": None, "src": {},
-           "cloud": None, "htf_rsi": None, "pullback": None,
+           "cloud": None, "htf_rsi": None, "pullback": None, "entry_spot": None,
            "errors": {}}   # {"levels"|"cloud"|"htf_rsi"|"pullback": 사유}
+    bars = []
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
         bars = [b for b in bars if b["T"] <= bar_close_ms]   # 신호 봉까지만
@@ -397,7 +402,13 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
     try:
         # 신호 시각까지 마감된 5m 봉만(1m 신호면 진행 중인 5m 봉은 제외)
         pb = fetch(symbol, CONFIG["PULLBACK_TF"], limit=CONFIG["PULLBACK_BARS"] + 2, end_ms=bar_close_ms)
-        out["pullback"] = pullback_check([b for b in pb if b["T"] <= bar_close_ms], side, entry)
+        closed = [b for b in pb if b["T"] <= bar_close_ms]
+        cmp_entry = entry
+        if spot_entry:
+            same = [b["c"] for b in closed + bars if b["T"] == bar_close_ms]
+            if same:
+                out["entry_spot"] = cmp_entry = same[0]
+        out["pullback"] = pullback_check(closed, side, cmp_entry)
     except Exception as e:
         out["errors"]["pullback"] = _err_text(e)
     return out
