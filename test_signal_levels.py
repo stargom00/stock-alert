@@ -179,7 +179,7 @@ def test_build_context_records_reasons():
 
     ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 100.0, 59_999, fetch=fetch)
     assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
-                             for k in ("levels", "cloud", "htf_rsi")}
+                             for k in ("levels", "cloud", "htf_rsi", "pullback")}
     assert lv.price_basis() == "현물"
 
 

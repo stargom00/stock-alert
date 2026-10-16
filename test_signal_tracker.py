@@ -109,14 +109,16 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     sent = []
     sig = tr.ingest_signal("BTCUSDT", "1m", "long", 80855.7, utc_ms(2026, 10, 15, 10, 47),
                            "webhook", sent.append, fetch_451, str(tmp_path / "s.json"))
-    assert set(sig["errors"]) == {"levels", "cloud", "htf_rsi"}
+    assert set(sig["errors"]) == {"levels", "cloud", "htf_rsi", "pullback"}
+    assert (sig["pullback_ok"], sig["ref_extreme"], sig["dist_pct"]) == (None, None, None)
     lines = sent[0].split("\n")
     assert lines[2:] == [
         "목표 —",
         "청산가(10배 격리): 73,579 (−9.00%)",
         "30m 구름 —",
         "2h RSI —",
-        "⚠️ 목표·30m 구름·2h RSI 조회 실패: "
+        "되돌림 —",
+        "⚠️ 목표·30m 구름·2h RSI·되돌림 조회 실패: "
         "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
         "포지션: 신규 1차 #P1",
         "신호ID #0001",
@@ -341,3 +343,47 @@ def test_signal_counts_line():
     assert lines[0].startswith("📊 코인 요약 (")
     assert "신호: 발송 1 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines
     assert "신호: 발송 2 · 억제 1 · 중복 1 · 반대방향 보류 1" in lines   # 30일
+
+
+# ── v2.43 신저점/신고점 경고 ──
+
+def test_pullback_check_message_and_fields(tmp_path):
+    t0 = utc_ms(2026, 10, 16, 8, 0)
+    # 5m 24봉(2h): 최저 81,400 / 최고 81,900. 그보다 오래된 봉의 극값(80,000·83,000)은 창 밖
+    bars5 = [{"t": t0 - (25 - i) * 300_000, "T": t0 - (24 - i) * 300_000 - 1, "o": 81600.0,
+              "h": 83000.0 if i == 0 else 81900.0, "l": 80000.0 if i == 0 else (81400.0 if i == 20 else 81500.0),
+              "c": 81600.0} for i in range(25)]
+    # 신호 봉 뒤(아직 미마감)의 봉은 제외돼야 함
+    bars5.append({"t": t0, "T": t0 + 299_999, "o": 81450.0, "h": 81460.0, "l": 81000.0, "c": 81450.0})
+
+    def fetch(symbol, tf, limit=500, end_ms=None, start_ms=None):
+        return bars5 if tf == "5m" else []
+
+    close = t0 - 1
+    assert lv.pullback_check([b for b in bars5 if b["T"] <= close], "long", 81_448.84)["pullback_ok"] is False
+    sent = []
+    p = str(tmp_path / "s.json")
+    warn = tr.ingest_signal("BTCUSDT", "1m", "long", 81_448.84, close - 59_999, "self", sent.append, fetch, p)
+    assert (warn["pullback_ok"], warn["ref_extreme"]) == (False, 81400.0)
+    assert warn["dist_pct"] == pytest.approx(0.06, abs=1e-6)
+    assert "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)" in sent[-1].split("\n")
+    ok = tr.ingest_signal("ETHUSDT", "1m", "long", 81_490.0, close - 59_999, "self", sent.append, fetch, p)
+    assert ok["pullback_ok"] and "되돌림 ✓" in sent[-1].split("\n")       # +0.11%
+    sh = tr.ingest_signal("SOLUSDT", "1m", "short", 81_850.0, close - 59_999, "self", sent.append, fetch, p)
+    assert (sh["pullback_ok"], sh["ref_extreme"]) == (False, 81900.0)
+    assert "⚠️ 신고점 구간 (2h 최고 81,900 대비 −0.06%)" in sent[-1].split("\n")
+    assert len(sent) == 3                                                   # 경고여도 발송(억제 안 함)
+
+
+def test_summary_pullback_breakdown_line():
+    now = utc_ms(2026, 10, 16, 20, 0)
+    t = now - 86_400_000
+    done = dict(bar_open_ms=t, status="done")
+    sigs = [base_sig(pullback_ok=True, result="hit_target2", result_pct=0.5, t1_hit_ms=t, mae_pct=0.2, **done),
+            base_sig(pullback_ok=True, result="expired", result_pct=-0.3, mae_pct=0.4, **done),
+            base_sig(pullback_ok=False, result="expired", result_pct=-0.8, mae_pct=1.2, **done),
+            base_sig(pullback_ok=False, bar_open_ms=t),                          # 기록 중 → 제외
+            base_sig(pullback_ok=False, sent=False, suppressed=True, **done),    # 미발송 → 제외
+            base_sig(**done)]                                                    # v2.43 이전 → 제외
+    lines = tr.format_summary(sigs, [], now).split("\n")
+    assert "되돌림 ✓ 2건: 목표1 1/2 · 평균 +0.10% · MAE −0.30% | ⚠️ 1건: 목표1 0/1 · 평균 −0.80% · MAE −1.20%" in lines

@@ -113,6 +113,25 @@ _SIDE_KO = {"long": "롱", "short": "숏"}
 _POS_KO = {"above": "위", "inside": "안", "below": "아래"}
 
 
+def _window_label():
+    mins = CONFIG["PULLBACK_BARS"] * TF_MS[CONFIG["PULLBACK_TF"]] // MIN_MS
+    return f"{mins // 60}h" if mins % 60 == 0 else f"{mins}m"
+
+
+def pullback_line(sig):
+    """v2.43 되돌림 ✓ / ⚠️ 신저점·신고점 구간. v2.43 이전 신호(필드 없음)는 None."""
+    if "pullback_ok" not in sig:
+        return None
+    if sig["pullback_ok"] is None:
+        return "되돌림 —"
+    if sig["pullback_ok"]:
+        return "되돌림 ✓"
+    long_ = sig["side"] == "long"
+    shown = sig["dist_pct"] if long_ else -sig["dist_pct"]     # 진입가 − 기준 (기준 대비 %)
+    return (f"⚠️ {'신저점' if long_ else '신고점'} 구간 ({_window_label()} {'최저' if long_ else '최고'} "
+            f"{fmt_px(sig['ref_extreme'])} 대비 {fmt_pct(shown)})")
+
+
 def format_signal_message(sig):
     entry = sig["entry"]
     side_ko = _SIDE_KO[sig["side"]]
@@ -149,10 +168,14 @@ def format_signal_message(sig):
         lines.append(f"{CONFIG['HTF_RSI_TF']} RSI {h['value']:.0f} {h['dir']}")
     else:
         lines.append(f"{CONFIG['HTF_RSI_TF']} RSI —")
+    pb_line = pullback_line(sig)
+    if pb_line:
+        lines.append(pb_line)
     # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
-    labels = {"levels": "목표", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI"}
+    labels = {"levels": "목표", "cloud": f"{CONFIG['CLOUD_TF']} 구름", "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI",
+              "pullback": "되돌림"}
     by_reason = {}
-    for k in ("levels", "cloud", "htf_rsi"):
+    for k in ("levels", "cloud", "htf_rsi", "pullback"):
         if k in errs:
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
@@ -246,6 +269,10 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "cloud": ({k: ctx["cloud"][k] for k in ("pos", "thick_pct", "bias")}
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
+            # v2.43 되돌림(통계용, 억제 안 함). 조회 실패면 셋 다 None
+            "pullback_ok": (ctx.get("pullback") or {}).get("pullback_ok"),
+            "ref_extreme": (ctx.get("pullback") or {}).get("ref_extreme"),
+            "dist_pct": (ctx.get("pullback") or {}).get("dist_pct"),
             "source": source,
             "errors": ctx["errors"], "price_basis": lv.price_basis(),
             "level_src": ctx.get("src") or {},
@@ -535,6 +562,30 @@ def signal_counts(signals, now_ms, days):
             "opposite": sum(1 for s in w if s.get("opposite_of"))}
 
 
+def pullback_stats(signals, now_ms, days):
+    """v2.43 발송 신호를 되돌림 ✓ / ⚠️로 나눠 신호 단위 결과 비교(기록 끝난 것만)."""
+    since = now_ms - days * 86_400_000
+    out = {}
+    for key, ok in (("ok", True), ("warn", False)):
+        w = [s for s in signals if s["bar_close_ms"] >= since and s.get("sent", True)
+             and s.get("pullback_ok") is ok and s.get("status") == "done"]
+        pcts = [s["result_pct"] for s in w if s.get("result_pct") is not None]
+        out[key] = {"n": len(w),
+                    "t1": sum(1 for s in w if s.get("t1_hit_ms")),
+                    "avg": sum(pcts) / len(pcts) if pcts else None,
+                    "mae": sum(s.get("mae_pct") or 0.0 for s in w) / len(w) if w else None}
+    return out
+
+
+def format_pullback_line(st):
+    def part(label, d):
+        if not d["n"]:
+            return f"{label} 0건"
+        return (f"{label} {d['n']}건: 목표1 {d['t1']}/{d['n']} · 평균 {fmt_pct(d['avg'])} · "
+                f"MAE {fmt_pct(-d['mae'])}")
+    return f"{part('되돌림 ✓', st['ok'])} | {part('⚠️', st['warn'])}"
+
+
 def format_summary(signals, positions, now_ms, windows=(7, 30)):
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
     lines = [f"📊 코인 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
@@ -544,6 +595,7 @@ def format_summary(signals, positions, now_ms, windows=(7, 30)):
         c = signal_counts(signals, now_ms, days)
         lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
                      f"반대방향 보류 {c['opposite']}")
+        lines.append(format_pullback_line(pullback_stats(signals, now_ms, days)))
     return "\n".join(lines)
 
 

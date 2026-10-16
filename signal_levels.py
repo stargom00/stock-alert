@@ -86,6 +86,10 @@ CONFIG = {
     "ICHI_SENKOU_B": 52,
     "ICHI_DISPLACEMENT": 26,  # "선행 26봉". 실제 이동은 26-1=25봉 — 트레이딩뷰 기본 Ichimoku와 동일
     "HTF_RSI_TF": os.environ.get("COIN_HTF_RSI_TF", "2h"),
+    # v2.43 신저점/신고점 경고(통계용, 억제 안 함): 5m 최근 N봉 최저(롱)/최고(숏) 대비 되돌림
+    "PULLBACK_TF": os.environ.get("COIN_PULLBACK_TF", "5m"),
+    "PULLBACK_BARS": _env_int("COIN_PULLBACK_BARS", "24"),
+    "PULLBACK_MIN_PCT": _env_float("COIN_PULLBACK_MIN_PCT", "0.1"),
     # 추적
     "EXPIRE_HOURS": _env_float("COIN_EXPIRE_HOURS", "24"),    # 신호 단위 기록(조용히)
     # v2.41 포지션(채널 방식, 손절 없음) — 봇은 주문 안 함, 가상 수량으로 추적만
@@ -350,11 +354,30 @@ def _err_text(e):
     return f"{type(e).__name__}: {e}"[:80]
 
 
+def pullback_check(bars, side, entry, n=None, min_pct=None):
+    """v2.43 최근 n봉(마감분) 최저가(롱)/최고가(숏) 대비 진입가가 min_pct 이상
+    되돌렸는지. dist_pct = 유리한 방향 거리(롱 = 진입이 최저보다 위, 숏 = 최고보다
+    아래면 +). 봉 없으면 None."""
+    n = CONFIG["PULLBACK_BARS"] if n is None else n
+    min_pct = CONFIG["PULLBACK_MIN_PCT"] if min_pct is None else min_pct
+    w = bars[-n:]
+    if not w:
+        return None
+    if side == "long":
+        ref = min(b["l"] for b in w)
+        dist = (entry - ref) / ref * 100.0
+    else:
+        ref = max(b["h"] for b in w)
+        dist = (ref - entry) / ref * 100.0
+    return {"pullback_ok": dist >= min_pct - 1e-9, "ref_extreme": ref, "dist_pct": dist}
+
+
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게)."""
     out = {"target1": None, "target2": None, "src": {},
-           "cloud": None, "htf_rsi": None, "errors": {}}   # {"levels"|"cloud"|"htf_rsi": 사유}
+           "cloud": None, "htf_rsi": None, "pullback": None,
+           "errors": {}}   # {"levels"|"cloud"|"htf_rsi"|"pullback": 사유}
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
         bars = [b for b in bars if b["T"] <= bar_close_ms]   # 신호 봉까지만
@@ -371,4 +394,10 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
         out["htf_rsi"] = htf_rsi(hb)
     except Exception as e:
         out["errors"]["htf_rsi"] = _err_text(e)
+    try:
+        # 신호 시각까지 마감된 5m 봉만(1m 신호면 진행 중인 5m 봉은 제외)
+        pb = fetch(symbol, CONFIG["PULLBACK_TF"], limit=CONFIG["PULLBACK_BARS"] + 2, end_ms=bar_close_ms)
+        out["pullback"] = pullback_check([b for b in pb if b["T"] <= bar_close_ms], side, entry)
+    except Exception as e:
+        out["errors"]["pullback"] = _err_text(e)
     return out
