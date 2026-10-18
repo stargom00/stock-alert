@@ -2,6 +2,15 @@
 
 v2.30 이전 이력은 git log 커밋 메시지 참고.
 
+## v2.46 — 읽기 API 2개 추가: 신호별 추적, 스캐너 코인 일지 대리 읽기 (2026-10-19)
+- `GET /api/coin-track`: `coin_signal_track.json`의 추적 레코드 그대로(읽기 전용).
+- `GET /api/coin-journal`: 눌림목 스캐너 `/api/coin-journal`을 봇의 `API_READ_TOKEN`
+  (`X-Api-Read-Token`)으로 `SCANNER_URL`에 GET 해서 본문을 그대로 전달. 스캐너 쪽은
+  `_BOT_READ_EXACT_PATHS`에 이 경로가 열려 있어야 함(pullback v5.351). 토큰 미설정·스캐너
+  실패·비JSON은 502. 둘 다 `COIN_API_READ_TOKEN`이 있으면 같은 헤더 검사.
+- 용도: Claude 예약 작업(매일 코인 요약·주간 리뷰)이 봇 주소 하나로 신호·추적·일지를 읽는다.
+- 주문·발송·기존 알림 로직 변경 없음. 새 환경변수 없음(SCANNER_URL·API_READ_TOKEN 기존 것).
+
 ## v2.45 — 반대방향 신호 발송 중단, 보낸 신호별 독립 추적 (2026-10-18)
 - 보유 중 반대방향 신호: 텔레그램 발송 없음(v2.42의 `#P1 반대 신호 … (보유 중)` 줄도 삭제,
   로그만). 저장 `sent=false`, `reason="opposite"`(신호 레코드에 `reason` 키 추가, 그 외 None).

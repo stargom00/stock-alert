@@ -76,3 +76,43 @@ def test_get_coin_positions_readonly(base, tmp_path):
     r = requests.get(base + "/api/coin-positions", timeout=5)
     assert r.status_code == 200 and r.json()["count"] == 1
     assert requests.post(base + "/api/coin-positions", timeout=5).status_code == 404
+
+
+def test_get_coin_track_readonly(base, tmp_path):
+    import coin_signal_track as st
+    st.save_tracks([{"id": 7, "side": "long"}], str(tmp_path / "coin_signal_track.json"))
+    r = requests.get(base + "/api/coin-track", timeout=5)
+    assert r.status_code == 200 and r.json()["count"] == 1 and r.json()["tracks"][0]["id"] == 7
+    assert requests.post(base + "/api/coin-track", timeout=5).status_code == 404
+
+
+def test_get_coin_journal_proxy(base, monkeypatch):
+    """v2.46: 스캐너 일지를 봇 토큰으로 대신 읽어 그대로 전달. 토큰 없으면 502, 바깥 실패도 502."""
+    import coin_http
+    calls = []
+
+    class _R:
+        status_code = 200
+        def json(self):
+            return {"records": [{"id": "c1"}]}
+
+    def fake_get(url, headers=None, timeout=None):
+        calls.append((url, headers))
+        return _R()
+
+    monkeypatch.setenv("SCANNER_URL", "https://scanner.test")
+    monkeypatch.setenv("API_READ_TOKEN", "tok")
+    monkeypatch.setattr(coin_http, "_scanner_get", fake_get)
+    r = requests.get(base + "/api/coin-journal", timeout=5)
+    assert r.status_code == 200 and r.json()["records"][0]["id"] == "c1"
+    assert calls == [("https://scanner.test/api/coin-journal", {"X-Api-Read-Token": "tok"})]
+    assert requests.post(base + "/api/coin-journal", timeout=5).status_code == 404
+
+    monkeypatch.delenv("API_READ_TOKEN")
+    assert requests.get(base + "/api/coin-journal", timeout=5).status_code == 502
+
+    monkeypatch.setenv("API_READ_TOKEN", "tok")
+    def boom(*a, **k):
+        raise requests.ConnectionError("x")
+    monkeypatch.setattr(coin_http, "_scanner_get", boom)
+    assert requests.get(base + "/api/coin-journal", timeout=5).status_code == 502
