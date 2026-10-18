@@ -9,6 +9,7 @@
   coin_positions: 발송 신호로 가상 포지션(채널 방식, 손절 없음) 신규/추가,
      1분마다 덜어내기·목표·포기선·만료 추적 (v2.41).
   track_open_signals(): 신호 단위 목표 도달 기록(발송 없음).
+  coin_signal_track: 발송 신호별 72h 독립 추적(TP·MAE·−1/−2% 선행, v2.45).
   daily_summary(): 매일 09:00 NZ, 포지션 기준.
 
 저장: $DATA_DIR/coin_signals.json (기존 sent_log.json과 같은 DATA_DIR 규칙).
@@ -24,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 import pytz
 
 import coin_positions as cp
+import coin_signal_track as st
 import signal_levels as lv
 from signal_levels import CONFIG, TF_MS
 
@@ -254,10 +256,12 @@ def cross_tf_confirm(signals, symbol, tf, side, bar_close_ms):
 
 
 def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
-                  fetch=lv.fetch_klines, path=None, now_ms=None, pos_path=None):
+                  fetch=lv.fetch_klines, path=None, now_ms=None, pos_path=None,
+                  track_path=None):
     """신호 1건 처리. 저장된 레코드(발송 여부는 sig["sent"]), 같은 주기 중복이면 None.
     발송 대상이면 포지션에 반영(신규/추가/보유), 반대 방향 포지션이 열려 있으면
-    저장만(opposite_of)."""
+    저장만(opposite_of, reason="opposite") — v2.45부터 텔레그램 알림도 없음.
+    발송 신호는 coin_signal_track에 72h 독립 추적 등록(track_path=None이면 기본 파일)."""
     bar_close_ms = bar_open_ms + TF_MS[tf] - 1
     with _lock:
         signals = load_signals(path)
@@ -299,6 +303,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "suppressed": sup is not None, "suppress_reason": sup,
             "duplicate": dup_of is not None, "dup_of": dup_of,
             "sent": sup is None and dup_of is None,
+            "reason": None,                   # v2.45 반대방향 보류 = "opposite"
             "opposite_of": None, "position_id": None, "position_action": None, "position_note": None,
             "confirm_of": None, "confirm_note": None,
             # 추적 상태
@@ -309,7 +314,6 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "result_ms": None, "result_bars": None, "result_pct": None,
         }
         pre_msgs = []
-        pos_msgs = []
         if sig["sent"]:
             bind = ref.get("position_id") if ref else None
             action, line, pre_msgs, pid = cp.on_signal(sig, fetch, path=pos_path, now_ms=now_ms,
@@ -322,16 +326,18 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                 if action == "confirm":
                     sig["position_note"] = None      # 확인 줄이 포지션 줄을 대신함
             if action == "opposite":
-                # v2.42: 신호 메시지는 안 보내고 포지션 메시지로 한 줄 알림
-                sig.update(sent=False, opposite_of=pid, position_note=None)
-                pos_msgs.append(line)
+                # v2.45: 신호·포지션 메시지 둘 다 안 보냄(포지션 이벤트·카운트만)
+                sig.update(sent=False, opposite_of=pid, position_note=None, reason="opposite")
+                print(f"[코인신호] {line}")
         signals.append(sig)
         save_signals(signals, path)
     for m in pre_msgs:          # 신호 직전까지 따라잡기에서 생긴 포지션 이벤트
         send(m)
-    for m in pos_msgs:
-        send(m)
     if sig["sent"]:
+        try:
+            st.register(sig, track_path)
+        except Exception as e:
+            print(f"[신호추적] #{sig['id']:04d} 등록 실패: {e}")
         send(format_signal_message(sig))
     else:
         why = [x for x in (sup and f"억제: {sup}", dup_of and f"중복: #{dup_of:04d}",
@@ -584,7 +590,7 @@ def signal_counts(signals, now_ms, days):
             "opposite": sum(1 for s in w if s.get("opposite_of"))}
 
 
-def format_summary(signals, positions, now_ms, windows=(7, 30)):
+def format_summary(signals, positions, now_ms, windows=(7, 30), tracks=()):
     """v2.44 요약: v2.44 포지션(고정 TP) 기준 + 미동 억제 + v2.44 이전 기록 분리."""
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
     lines = [f"📊 코인 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
@@ -594,6 +600,7 @@ def format_summary(signals, positions, now_ms, windows=(7, 30)):
         c = signal_counts(signals, now_ms, days)     # v2.44.2 복구
         lines.append(f"신호: 발송 {c['sent']} · 억제 {c['suppressed']} · 중복 {c['duplicate']} · "
                      f"반대방향 {c['opposite']}")
+        lines += st.format_lines(tracks, now_ms, days)       # v2.45 신호별 독립 추적
         lines.append(format_still_line(still_stats(signals, now_ms, days)))
         legacy = cp.format_legacy_line(cp.summarize_legacy(positions, now_ms, days),
                                        sum(1 for s in signals if "tp" not in s and s.get("sent", True)
@@ -603,9 +610,10 @@ def format_summary(signals, positions, now_ms, windows=(7, 30)):
     return "\n".join(lines)
 
 
-def daily_summary(send, path=None, pos_path=None, now_ms=None):
+def daily_summary(send, path=None, pos_path=None, now_ms=None, track_path=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    send(format_summary(load_signals(path), cp.load_positions(pos_path), now_ms))
+    send(format_summary(load_signals(path), cp.load_positions(pos_path), now_ms,
+                        tracks=st.load_tracks(track_path)))
 
 
 # ── 등록 ──────────────────────────────────────────────────────────────
@@ -631,6 +639,7 @@ def register(sched, send_telegram):
     sched.every(5).seconds.do(_safe(lambda: drain_webhook_queue(send), "webhook"))
     sched.every(1).minutes.do(_safe(lambda: track_open_signals(send), "신호기록"))
     sched.every(1).minutes.do(_safe(lambda: cp.track_positions(send, lv.fetch_klines), "포지션추적"))
+    sched.every(1).minutes.do(_safe(lambda: st.track_open(lv.fetch_klines), "신호별추적"))
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
         _safe(lambda: daily_summary(send), "요약"))
     try:

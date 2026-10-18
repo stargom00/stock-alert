@@ -143,9 +143,9 @@ def test_ingest_dedup_n_bars(tmp_path):
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 11 * 300_000, "self", sent.append, _fake_fetch_levels, p) is None
     opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
     assert opp["id"] == 2 and opp["opposite_of"] == 1 and not opp["sent"]   # v2.41 반대 방향 = 신호는 저장만
-    assert sent[-1] == "#P1 반대 신호 #0002 발생 (보유 중)"                   # v2.42 포지션 메시지 한 줄
+    assert opp["reason"] == "opposite" and len(sent) == 1                  # v2.45 텔레그램 알림 없음
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
-    assert len(sent) == 3
+    assert len(sent) == 2
     saved = tr.load_signals(p)
     assert [s["source"] for s in saved] == ["webhook", "self", "self"]
     assert saved[0]["status"] == "open" and saved[0]["tp"] == pytest.approx(99.5)
@@ -379,6 +379,7 @@ def test_summary_still_suppressed_and_legacy_split():
     assert "[최근 7일] 포지션 0 (TP 0 · 포기선 0 · 만료 0 / 보유 0)" in lines
     assert "신호: 발송 2 · 억제 3 · 중복 0 · 반대방향 0" in lines           # 이전 신호 1 포함
     assert "미동 억제 3건 → TP 1/2 (50%) (기록 중 1)" in lines
+    assert "되돌림 ✓ 신호: TP 0/0 · MAE 평균 — · −2% 선행 0건" in lines      # v2.45 (추적 파일 없음)
     assert "v2.44 이전: 포지션 1 (목표2 1 · 포기선 0 · 만료 0 / 보유 0) · 발송 신호 1" in lines
 
 
@@ -420,3 +421,20 @@ def test_suppressed_signal_does_not_block_same_tf_next_signal(tmp_path, monkeypa
     # 발송된 신호는 계속 기준 — 30봉 안 다음 신호는 중복
     assert tr.ingest_signal("BTCUSDT", "1m", "long", 100.0, t + 5 * MIN, "webhook", sent.append, no_fetch,
                             path=p) is None
+
+
+def test_opposite_signal_not_sent_but_counted(tmp_path):
+    """v2.45 보유 중 반대방향 신호 → 텔레그램 0건, 요약 반대방향 +1, dedup·추적 기준 아님."""
+    p, tp = str(tmp_path / "s.json"), str(tmp_path / "track.json")
+    sent = []
+    t0 = utc_ms(2026, 10, 15, 8, 0)
+    ing = lambda side, t: tr.ingest_signal("BTCUSDT", "5m", side, 100.0, t, "self", sent.append,
+                                           _fake_fetch_levels, p, track_path=tp)
+    ing("short", t0)
+    n0 = len(sent)
+    opp = ing("long", t0 + 300_000)
+    assert len(sent) == n0                                                  # 발송 0
+    assert (opp["sent"], opp["reason"], opp["opposite_of"]) == (False, "opposite", 1)
+    assert tr.signal_counts(tr.load_signals(p), t0 + 600_000, 7)["opposite"] == 1
+    assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1]           # 발송 신호만 추적
+    assert not tr.is_duplicate(tr.load_signals(p), "BTCUSDT", "5m", "long", t0 + 2 * 300_000)
