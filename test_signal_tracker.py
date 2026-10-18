@@ -142,10 +142,11 @@ def test_ingest_dedup_n_bars(tmp_path):
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 100.0, t0, "self", sent.append, _fake_fetch_levels, p) is None
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 11 * 300_000, "self", sent.append, _fake_fetch_levels, p) is None
     opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
-    assert opp["id"] == 2 and opp["opposite_of"] == 1 and not opp["sent"]   # v2.41 반대 방향 = 신호는 저장만
-    assert opp["reason"] == "opposite" and len(sent) == 1                  # v2.45 텔레그램 알림 없음
+    assert opp["id"] == 2 and opp["opposite_of"] == 1 and opp["sent"]       # v2.47 반대 방향도 발송
+    assert opp["reason"] == "opposite" and len(sent) == 2
+    assert "#P1 반대방향 보유 중" in sent[-1]
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
-    assert len(sent) == 2
+    assert len(sent) == 3
     saved = tr.load_signals(p)
     assert [s["source"] for s in saved] == ["webhook", "self", "self"]
     assert saved[0]["status"] == "open" and saved[0]["tp"] == pytest.approx(99.5)
@@ -423,8 +424,8 @@ def test_suppressed_signal_does_not_block_same_tf_next_signal(tmp_path, monkeypa
                             path=p) is None
 
 
-def test_opposite_signal_not_sent_but_counted(tmp_path):
-    """v2.45 보유 중 반대방향 신호 → 텔레그램 0건, 요약 반대방향 +1, dedup·추적 기준 아님."""
+def test_opposite_signal_sent_with_note_and_counted(tmp_path):
+    """v2.47 보유 중 반대방향 신호 → 그대로 발송(참고 한 줄), 요약 반대방향 +1, dedup·추적 기준에 포함."""
     p, tp = str(tmp_path / "s.json"), str(tmp_path / "track.json")
     sent = []
     t0 = utc_ms(2026, 10, 15, 8, 0)
@@ -433,8 +434,9 @@ def test_opposite_signal_not_sent_but_counted(tmp_path):
     ing("short", t0)
     n0 = len(sent)
     opp = ing("long", t0 + 300_000)
-    assert len(sent) == n0                                                  # 발송 0
-    assert (opp["sent"], opp["reason"], opp["opposite_of"]) == (False, "opposite", 1)
+    assert len(sent) == n0 + 1                                              # 발송 1
+    assert "봇 가상 포지션 #P1 반대방향 보유 중" in sent[-1]
+    assert (opp["sent"], opp["reason"], opp["opposite_of"]) == (True, "opposite", 1)
     assert tr.signal_counts(tr.load_signals(p), t0 + 600_000, 7)["opposite"] == 1
-    assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1]           # 발송 신호만 추적
-    assert not tr.is_duplicate(tr.load_signals(p), "BTCUSDT", "5m", "long", t0 + 2 * 300_000)
+    assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1, 2]        # 발송됐으니 추적도
+    assert tr.is_duplicate(tr.load_signals(p), "BTCUSDT", "5m", "long", t0 + 2 * 300_000)

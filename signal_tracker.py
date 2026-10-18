@@ -260,7 +260,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                   track_path=None):
     """신호 1건 처리. 저장된 레코드(발송 여부는 sig["sent"]), 같은 주기 중복이면 None.
     발송 대상이면 포지션에 반영(신규/추가/보유), 반대 방향 포지션이 열려 있으면
-    저장만(opposite_of, reason="opposite") — v2.45부터 텔레그램 알림도 없음.
+    opposite_of·reason="opposite"를 달고 참고 한 줄과 함께 그대로 발송(v2.47; v2.45~46은 미발송).
     발송 신호는 coin_signal_track에 72h 독립 추적 등록(track_path=None이면 기본 파일)."""
     bar_close_ms = bar_open_ms + TF_MS[tf] - 1
     with _lock:
@@ -326,8 +326,12 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                 if action == "confirm":
                     sig["position_note"] = None      # 확인 줄이 포지션 줄을 대신함
             if action == "opposite":
-                # v2.45: 신호·포지션 메시지 둘 다 안 보냄(포지션 이벤트·카운트만)
-                sig.update(sent=False, opposite_of=pid, position_note=None, reason="opposite")
+                # v2.47(사용자 지시 2026-10-19 "알림은 그래도 다 와야지"): 신호는 그대로 발송.
+                # 봇의 가상 포지션은 슬기 실제 포지션과 따로 놀 수 있어(봇 롱 vs 실제 숏) 반대방향을
+                # 숨기면 필요한 신호가 빠진다. 가상 포지션 상태는 참고 한 줄로만. sent=True라
+                # dedup 기준·72h 추적에도 들어간다. v2.45~v2.46은 여기서 sent=False였다.
+                sig.update(opposite_of=pid, reason="opposite",
+                           position_note=f"봇 가상 포지션 #P{pid} 반대방향 보유 중 (참고만 — 네 실제 포지션과 무관)")
                 print(f"[코인신호] {line}")
         signals.append(sig)
         save_signals(signals, path)
