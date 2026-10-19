@@ -156,7 +156,8 @@ def format_signal_message(sig):
     side_ko = _SIDE_KO[sig["side"]]
     head = "🔺" if sig["side"] == "long" else "🔻"
     errs = sig.get("errors") or {}
-    lines = [f"{head} {sig['symbol']} {sig['tf']} {side_ko} 신호 {fmt_signal_time(sig['bar_close_ms'])}",
+    # v2.48(사용자 지시 2026-10-19 "1m을 볼드체로, 눈에 띄게"): 주기·방향을 <b>로 — main.send_telegram이 parse_mode=HTML
+    lines = [f"{head} {sig['symbol']} <b>{sig['tf']} {side_ko}</b> 신호 {fmt_signal_time(sig['bar_close_ms'])}",
              f"진입 참고 {fmt_px(entry)}"]
     lines.append(tp_line(sig))
     if "ref" not in errs:

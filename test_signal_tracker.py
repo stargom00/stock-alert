@@ -85,7 +85,7 @@ def test_signal_message_format():
                  htf_rsi={"value": 38.2, "dir": "↓"},
                  position_note="포지션 #P12 추가 2회차 (평단 81,100 → 81,153)")
     assert tr.format_signal_message(s).split("\n") == [
-        "🔺 BTCUSDT 5m 롱 신호 08:05 UTC (17:05 KST / 21:05 NZ)",
+        "🔺 BTCUSDT <b>5m 롱</b> 신호 08:05 UTC (17:05 KST / 21:05 NZ)",   # v2.48 주기·방향 볼드
         "진입 참고 82,050",
         "TP +0.5% → 82,460 (20배 ROI +10%)",
         "참고 1m 직전 고점 82,300 (+0.30%)",
