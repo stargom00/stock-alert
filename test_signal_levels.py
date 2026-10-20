@@ -193,7 +193,22 @@ def test_build_context_records_reasons():
 
     ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 100.0, 59_999, fetch=fetch)
     assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
-                             for k in ("bar", "ref", "cloud", "htf_rsi", "pullback")}
+                             for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal")}   # v2.49
     assert lv.price_basis() == "현물"
+    ctx15 = lv.build_signal_context("BTCUSDT", "15m", "long", 100.0, 899_999, fetch=fetch)
+    assert "htf_signal" not in ctx15["errors"] and ctx15["htf_signal"] is None       # 15m 신호엔 해당 없음
+
+
+def test_htf_opposite_check():
+    """v2.49 — 15m 마지막 3봉 안에 반대 신호(RSI 30 밑 → 양봉) 있으면 opposite, 그 확인봉 마감 ms."""
+    closes = [100 - i * 0.8 for i in range(40)]          # 쭉 하락 → RSI 0 근처
+    bars = [B(c + 0.5, c - 0.5, o=c + 0.3, c=c, t=i * 900_000) for i, c in enumerate(closes)]
+    # 마지막에서 두 번째 봉을 양봉으로(RSI봉 = 그 직전, 30 밑) → 롱 신호. 마지막 봉은 음봉.
+    bars[-2] = B(70.5, 69.0, o=69.2, c=70.3, t=38 * 900_000)
+    r = lv.htf_opposite_check(bars, "short", n=3)
+    assert r["opposite"] is True and r["at_ms"] == bars[-2]["T"] and r["n"] == 3
+    assert lv.htf_opposite_check(bars, "long", n=3)["opposite"] is False      # 같은 방향 신호는 해당 없음
+    assert lv.htf_opposite_check(bars, "short", n=1)["opposite"] is False     # 창 밖
+    assert lv.htf_opposite_check(bars[:5], "short", n=3)["opposite"] is False  # RSI 미수렴 → 신호 없음
 
 

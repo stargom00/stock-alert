@@ -120,6 +120,20 @@ def _window_label():
     return f"{mins // 60}h" if mins % 60 == 0 else f"{mins}m"
 
 
+def htf_signal_line(sig):
+    """v2.49 큰 주기 반대 신호 경고. 필드 없거나(옛 신호·HTF 이상 주기) None이면 줄 없음."""
+    h = sig.get("htf_signal")
+    if not h:
+        return None
+    side_ko = _SIDE_KO[sig["side"]]
+    opp_ko = _SIDE_KO["short" if sig["side"] == "long" else "long"]
+    if not h["opposite"]:
+        return f"{h['tf']} 반대 신호 없음 ✓ (최근 {h['n']}봉)"
+    when = datetime.fromtimestamp((h["at_ms"] + 1) / 1000, timezone.utc).strftime("%H:%M")
+    move = "반등" if sig["side"] == "short" else "되돌림"
+    return f"⚠️ {h['tf']} 최근 {h['n']}봉에 {opp_ko} 신호 ({when} UTC) — {move} 중 {side_ko}"
+
+
 def pullback_line(sig):
     """v2.43 되돌림 ✓ / ⚠️ 신저점·신고점 구간. v2.43 이전 신호(필드 없음)는 None."""
     if "pullback_ok" not in sig:
@@ -138,8 +152,8 @@ def tp_line(sig):
     """v2.44 TP +0.5% → 82,460 (20배 ROI +10%)"""
     pct = sig["tp_pct"]
     sign = "+" if sig["side"] == "long" else "−"
-    return (f"TP {sign}{pct:g}% → {fmt_px(sig['tp'])} "
-            f"({CONFIG['TP_ROI_LEV']:g}배 ROI +{round(pct * CONFIG['TP_ROI_LEV'], 2):g}%)")
+    return (f"TP {fmt_px(sig['tp'])} ({sign}{pct:g}% · "
+            f"{CONFIG['TP_ROI_LEV']:g}배 ROI +{round(pct * CONFIG['TP_ROI_LEV'], 2):g}%)")
 
 
 def ref_line(sig):
@@ -152,38 +166,44 @@ def ref_line(sig):
 
 
 def format_signal_message(sig):
+    """v2.49(사용자 지시 2026-10-20 "한눈에 안 들어와, 정리해줘"): 3덩어리 — 머리(주기·방향·가격·시각),
+    숫자(TP·청산·참고), 판정(되돌림·15m 반대 신호·구름·RSI). 꼬리에 ID·가격 기준·가상 포지션."""
     entry = sig["entry"]
     side_ko = _SIDE_KO[sig["side"]]
     head = "🔺" if sig["side"] == "long" else "🔻"
     errs = sig.get("errors") or {}
-    # v2.48(사용자 지시 2026-10-19 "1m을 볼드체로, 눈에 띄게"): 주기·방향을 <b>로 — main.send_telegram이 parse_mode=HTML
-    lines = [f"{head} {sig['symbol']} <b>{sig['tf']} {side_ko}</b> 신호 {fmt_signal_time(sig['bar_close_ms'])}",
-             f"진입 참고 {fmt_px(entry)}"]
-    lines.append(tp_line(sig))
-    if "ref" not in errs:
-        lines.append(ref_line(sig))
-    # v2.41: 손절·손익비 대신 청산가 참고(채널 방식 — 강제청산 리스크만 관리)
+    t = datetime.fromtimestamp((sig["bar_close_ms"] + 1) / 1000, timezone.utc)
+    when = f"{t.strftime('%H:%M')} UTC ({t.astimezone(NZ_TZ).strftime('%H:%M')} NZ)"
+    lines = [f"{head} {sig['symbol']} <b>{sig['tf']} {side_ko}</b> {fmt_px(entry)} · {when}",
+             "🎯 " + tp_line(sig)]
     liq = lv.liquidation_price(sig["side"], entry)
-    lines.append(f"청산가({CONFIG['TP_ROI_LEV']:g}배 격리): {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})")
-    c = sig.get("cloud")
-    if c:
-        tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
-        lines.append(f"{CONFIG['CLOUD_TF']} 구름: {_POS_KO[c['pos']]}, 두께 {c['thick_pct']:.1f}% → {tail}")
-    else:
-        lines.append(f"{CONFIG['CLOUD_TF']} 구름 —")
-    h = sig.get("htf_rsi")
-    if h:
-        lines.append(f"{CONFIG['HTF_RSI_TF']} RSI {h['value']:.0f} {h['dir']}")
-    else:
-        lines.append(f"{CONFIG['HTF_RSI_TF']} RSI —")
+    liq_s = f"💀 청산 {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})"
+    if "ref" not in errs:
+        liq_s += " · " + ref_line(sig)
+    lines.append(liq_s)
+    lines.append("")
+    lines.append("<b>판정</b>")
     pb_line = pullback_line(sig)
     if pb_line:
         lines.append(pb_line)
+    hs_line = htf_signal_line(sig)
+    if hs_line:
+        lines.append(hs_line)
+    c = sig.get("cloud")
+    if c:
+        tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
+        cloud_s = f"{CONFIG['CLOUD_TF']} 구름 {_POS_KO[c['pos']]}·{tail} (두께 {c['thick_pct']:.1f}%)"
+    else:
+        cloud_s = f"{CONFIG['CLOUD_TF']} 구름 —"
+    h = sig.get("htf_rsi")
+    rsi_s = f"{CONFIG['HTF_RSI_TF']} RSI {h['value']:.0f}{h['dir']}" if h else f"{CONFIG['HTF_RSI_TF']} RSI —"
+    lines.append(f"{cloud_s} · {rsi_s}")
     # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
     labels = {"bar": "확인봉", "ref": "1m 참고", "cloud": f"{CONFIG['CLOUD_TF']} 구름",
-              "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI", "pullback": "되돌림"}
+              "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI", "pullback": "되돌림",
+              "htf_signal": f"{CONFIG['HTF_SIGNAL_TF']} 반대 신호"}
     by_reason = {}
-    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback"):
+    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal"):
         if k in errs:
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
@@ -192,8 +212,8 @@ def format_signal_message(sig):
         lines.append(sig["confirm_note"])
     if sig.get("position_note"):
         lines.append(sig["position_note"])
-    lines.append(f"신호ID #{sig['id']:04d}")
-    lines.append(f"가격 기준: {sig.get('price_basis') or lv.price_basis()}")
+    lines.append("")
+    lines.append(f"#{sig['id']:04d} · {sig.get('price_basis') or lv.price_basis()} 기준")
     return "\n".join(lines)
 
 
@@ -292,6 +312,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             "cloud": ({k: ctx["cloud"][k] for k in ("pos", "thick_pct", "bias")}
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
+            "htf_signal": ctx.get("htf_signal"),                   # v2.49 큰 주기 반대 신호(경고만)
             # v2.43 되돌림(통계용, 억제 안 함). 조회 실패면 셋 다 None
             "pullback_ok": (ctx.get("pullback") or {}).get("pullback_ok"),
             "ref_extreme": (ctx.get("pullback") or {}).get("ref_extreme"),
@@ -332,7 +353,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                 # 숨기면 필요한 신호가 빠진다. 가상 포지션 상태는 참고 한 줄로만. sent=True라
                 # dedup 기준·72h 추적에도 들어간다. v2.45~v2.46은 여기서 sent=False였다.
                 sig.update(opposite_of=pid, reason="opposite",
-                           position_note=f"봇 가상 포지션 #P{pid} 반대방향 보유 중 (참고만 — 네 실제 포지션과 무관)")
+                           position_note=f"봇 가상 #P{pid} 반대 보유 (참고만)")
                 print(f"[코인신호] {line}")
         signals.append(sig)
         save_signals(signals, path)

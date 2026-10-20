@@ -84,20 +84,19 @@ def test_signal_message_format():
                  cloud={"pos": "above", "thick_pct": 1.5, "bias": "편"},
                  htf_rsi={"value": 38.2, "dir": "↓"},
                  position_note="포지션 #P12 추가 2회차 (평단 81,100 → 81,153)")
-    assert tr.format_signal_message(s).split("\n") == [
-        "🔺 BTCUSDT <b>5m 롱</b> 신호 08:05 UTC (17:05 KST / 21:05 NZ)",   # v2.48 주기·방향 볼드
-        "진입 참고 82,050",
-        "TP +0.5% → 82,460 (20배 ROI +10%)",
-        "참고 1m 직전 고점 82,300 (+0.30%)",
-        "청산가(20배 격리): 78,358 (−4.50%)",
-        "30m 구름: 위, 두께 1.5% → 롱 편",
-        "2h RSI 38 ↓",
+    assert tr.format_signal_message(s).split("\n") == [            # v2.49 3덩어리 배치
+        "🔺 BTCUSDT <b>5m 롱</b> 82,050 · 08:05 UTC (21:05 NZ)",
+        "🎯 TP 82,460 (+0.5% · 20배 ROI +10%)",
+        "💀 청산 78,358 (−4.50%) · 참고 1m 직전 고점 82,300 (+0.30%)",
+        "",
+        "<b>판정</b>",
+        "30m 구름 위·롱 편 (두께 1.5%) · 2h RSI 38↓",
         "포지션 #P12 추가 2회차 (평단 81,100 → 81,153)",
-        "신호ID #0042",
-        "가격 기준: 현물",
+        "",
+        "#0042 · 현물 기준",
     ]
     short = tr.format_signal_message(base_sig(tp=99.7, tp_pct=0.3)).split("\n")
-    assert "TP −0.3% → 99.700 (20배 ROI +6%)" in short and "참고 1m 직전 저점 없음" in short
+    assert "🎯 TP 99.700 (−0.3% · 20배 ROI +6%)" in short and any("참고 1m 직전 저점 없음" in x for x in short)
 
 
 def test_ingest_klines_451_reason_in_message(tmp_path):
@@ -108,21 +107,22 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     sent = []
     sig = tr.ingest_signal("BTCUSDT", "1m", "long", 80855.7, utc_ms(2026, 10, 15, 10, 47),
                            "webhook", sent.append, fetch_451, str(tmp_path / "s.json"))
-    assert set(sig["errors"]) == {"bar", "ref", "cloud", "htf_rsi", "pullback"}
+    assert set(sig["errors"]) == {"bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal"}   # v2.49 15m 반대 신호 포함
     assert (sig["tp"], sig["suppressed"]) == (pytest.approx(80855.7 * 1.005), False)   # TP는 조회 불필요
     assert (sig["pullback_ok"], sig["ref_extreme"], sig["dist_pct"]) == (None, None, None)
     lines = sent[0].split("\n")
-    assert lines[2:] == [
-        "TP +0.5% → 81,260 (20배 ROI +10%)",
-        "청산가(20배 격리): 77,217 (−4.50%)",
-        "30m 구름 —",
-        "2h RSI —",
+    assert lines[1:] == [                                            # v2.49 배치
+        "🎯 TP 81,260 (+0.5% · 20배 ROI +10%)",
+        "💀 청산 77,217 (−4.50%)",
+        "",
+        "<b>판정</b>",
         "되돌림 —",
-        "⚠️ 확인봉·1m 참고·30m 구름·2h RSI·되돌림 조회 실패: "
+        "30m 구름 — · 2h RSI —",
+        "⚠️ 확인봉·1m 참고·30m 구름·2h RSI·되돌림·15m 반대 신호 조회 실패: "
         "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
         "포지션: 신규 1차 #P1",
-        "신호ID #0001",
-        "가격 기준: 현물",
+        "",
+        "#0001 · 현물 기준",
     ]
     assert "없음" not in sent[0] and "계산 실패" not in sent[0]
 
@@ -144,7 +144,7 @@ def test_ingest_dedup_n_bars(tmp_path):
     opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
     assert opp["id"] == 2 and opp["opposite_of"] == 1 and opp["sent"]       # v2.47 반대 방향도 발송
     assert opp["reason"] == "opposite" and len(sent) == 2
-    assert "#P1 반대방향 보유 중" in sent[-1]
+    assert "#P1 반대 보유" in sent[-1]
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
     assert len(sent) == 3
     saved = tr.load_signals(p)
@@ -400,7 +400,7 @@ def test_webhook_pullback_uses_spot_converted_entry(tmp_path):
     assert (w["entry"], w["entry_spot"]) == (81_540.0, 81_450.0)
     assert w["pullback_ok"] is False and w["dist_pct"] == pytest.approx(50 / 81_400 * 100)
     assert "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)" in sent[-1].split("\n")
-    assert "진입 참고 81,540" in sent[-1].split("\n")                     # 표시·포지션은 선물가 그대로
+    assert sent[-1].split("\n")[0].endswith("81,540 · 08:00 UTC (21:00 NZ)")                     # 표시·포지션은 선물가 그대로
     # 자체 판정(현물 진입가)은 환산 안 함
     s_ = tr.ingest_signal("ETHUSDT", "5m", "long", 81_540.0, t0 - 300_000, "self", sent.append, fetch, p)
     assert s_["entry_spot"] is None and s_["pullback_ok"] is True
@@ -435,7 +435,7 @@ def test_opposite_signal_sent_with_note_and_counted(tmp_path):
     n0 = len(sent)
     opp = ing("long", t0 + 300_000)
     assert len(sent) == n0 + 1                                              # 발송 1
-    assert "봇 가상 포지션 #P1 반대방향 보유 중" in sent[-1]
+    assert "봇 가상 #P1 반대 보유" in sent[-1]
     assert (opp["sent"], opp["reason"], opp["opposite_of"]) == (True, "opposite", 1)
     assert tr.signal_counts(tr.load_signals(p), t0 + 600_000, 7)["opposite"] == 1
     assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1, 2]        # 발송됐으니 추적도

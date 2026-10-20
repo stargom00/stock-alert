@@ -90,6 +90,11 @@ CONFIG = {
     "PULLBACK_TF": os.environ.get("COIN_PULLBACK_TF", "5m"),
     "PULLBACK_BARS": _env_int("COIN_PULLBACK_BARS", "24"),
     "PULLBACK_MIN_PCT": _env_float("COIN_PULLBACK_MIN_PCT", "0.1"),
+    # v2.49(사용자 지시 2026-10-20): 큰 주기 반대 신호 경고 — 1m 신호 때 15m 최근 N봉에 반대방향
+    # 신호(같은 규칙)가 있으면 "반등/되돌림 안의 잡음"으로 ⚠️. 억제 안 함, 통계용.
+    # 경위: 15m ▲ 롱 두 개(01:00·01:15 UTC) 30분 뒤 1m ▼ 숏에 들어갔다가 +0.5% 역행.
+    "HTF_SIGNAL_TF": os.environ.get("COIN_HTF_SIGNAL_TF", "15m"),
+    "HTF_SIGNAL_BARS": _env_int("COIN_HTF_SIGNAL_BARS", "3"),
     # 추적
     "EXPIRE_HOURS": _env_float("COIN_EXPIRE_HOURS", "24"),    # 신호 단위 기록(조용히)
     # v2.41 포지션(채널 방식, 손절 없음) — 봇은 주문 안 함, 가상 수량으로 추적만
@@ -356,6 +361,20 @@ def pullback_check(bars, side, entry, n=None, min_pct=None):
     return {"pullback_ok": dist >= min_pct - 1e-9, "ref_extreme": ref, "dist_pct": dist}
 
 
+def htf_opposite_check(bars, side, n=None, low=None, high=None):
+    """큰 주기 봉(마감분, 시간순)의 마지막 n봉 안에 side와 반대방향 신호(signal_at 규칙)가 있나.
+    반환 {"opposite": bool, "at_ms": 가장 최근 반대 신호의 확인봉 마감 ms|None, "n": n}.
+    RSI는 전체 bars로 계산(수렴 위해 수백 봉 필요)."""
+    n = CONFIG["HTF_SIGNAL_BARS"] if n is None else n
+    want = "short" if side == "long" else "long"
+    rsi = rsi_wilder([b["c"] for b in bars], CONFIG["RSI_LEN"])
+    at = None
+    for i in range(max(1, len(bars) - n), len(bars)):
+        if signal_at(bars, i, rsi, low, high) == want:
+            at = bars[i]["T"]
+    return {"opposite": at is not None, "at_ms": at, "n": n}
+
+
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게).
@@ -369,7 +388,8 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
     out = {"tp": tp_price(side, entry, pct), "tp_pct": pct,
            "confirm_range_pct": None, "ref_swing": None,
            "cloud": None, "htf_rsi": None, "pullback": None, "entry_spot": None,
-           "errors": {}}   # {"bar"|"ref"|"cloud"|"htf_rsi"|"pullback": 사유}
+           "htf_signal": None,   # v2.49 {"tf","opposite","at_ms","n"} — 신호 주기가 HTF 이상이면 None(해당 없음)
+           "errors": {}}   # {"bar"|"ref"|"cloud"|"htf_rsi"|"pullback"|"htf_signal": 사유}
     bars = []
     try:
         bars = fetch(symbol, tf, limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
@@ -411,4 +431,12 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
         out["pullback"] = pullback_check(closed, side, cmp_entry)
     except Exception as e:
         out["errors"]["pullback"] = _err_text(e)
+    htf = CONFIG["HTF_SIGNAL_TF"]
+    if TF_MS.get(tf, 0) < TF_MS.get(htf, 0):
+        try:
+            hb = fetch(symbol, htf, limit=300, end_ms=bar_close_ms)
+            hclosed = [b for b in hb if b["T"] <= bar_close_ms]     # 1m 신호 시각까지 마감된 HTF 봉만
+            out["htf_signal"] = {"tf": htf, **htf_opposite_check(hclosed, side)}
+        except Exception as e:
+            out["errors"]["htf_signal"] = _err_text(e)
     return out
