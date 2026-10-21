@@ -1,0 +1,93 @@
+# 코인 신호·추적·일지 스냅샷 → coin-snapshots 브랜치 (v2.47)
+#
+# 왜: Claude 예약 점검(cloud 세션)은 railway.app·binance 도메인이 egress 프록시에서
+# 403으로 막혀 /api/coin-* 를 직접 못 읽는다. GitHub은 읽힌다. 그래서 Actions가 대신
+# 읽어 coin-snapshots 브랜치의 snapshots/coin/latest.json 에 커밋하고, 점검은 그 파일을
+# raw.githubusercontent.com 으로 읽는다.
+#
+# main 에는 아무것도 커밋하지 않는다 — Railway 가 main 만 보고 재배포하므로 매시간
+# 재배포되는 사고를 피하기 위해 쓰기 대상은 coin-snapshots 브랜치뿐이다.
+#
+# 매시 45분(UTC) + 수동 실행(workflow_dispatch). 점검 직전에 수동 실행하면 최신본.
+# COIN_API_READ_TOKEN 시크릿이 있으면 X-Api-Read-Token 헤더로 보낸다(없으면 헤더 생략).
+name: coin snapshot
+
+on:
+  schedule:
+    - cron: '45 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coin-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: coin-snapshots
+          fetch-depth: 1
+
+      - name: Fetch coin endpoints
+        env:
+          BASE: https://stock-alert-production-275a.up.railway.app
+          TOKEN: ${{ secrets.COIN_API_READ_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          base = os.environ["BASE"].rstrip("/")
+          token = os.environ.get("TOKEN", "")
+          hdr = {"X-Api-Read-Token": token} if token else {}
+
+          def get(url, headers=None):
+              req = urllib.request.Request(url, headers=headers or {})
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      raw = r.read().decode("utf-8", "replace")
+                      status = r.status
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode("utf-8", "replace")
+                  status = e.code
+              except Exception as e:  # noqa: BLE001
+                  return {"status": 0, "error": f"{type(e).__name__}: {e}"}
+              try:
+                  body = json.loads(raw)
+              except ValueError:
+                  body = {"_raw": raw[:2000]}
+              return {"status": status, "body": body}
+
+          out = {"fetched_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions"):
+              out[name] = get(f"{base}/api/{name}", hdr)
+              time.sleep(0.5)
+          out["btc_price"] = get("https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT")
+
+          os.makedirs("snapshots/coin", exist_ok=True)
+          with open("snapshots/coin/latest.json", "w", encoding="utf-8") as f:
+              json.dump(out, f, ensure_ascii=False, indent=1)
+
+          # 요약 한 줄 (Actions 로그용)
+          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions", "btc_price"):
+              r = out[name]
+              n = r.get("body", {}).get("count") if isinstance(r.get("body"), dict) else None
+              print(f"{name}: status={r.get('status')} count={n} err={r.get('error')}")
+          PY
+
+      - name: Commit to coin-snapshots
+        run: |
+          git config user.name "coin-snapshot[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snapshots/coin/latest.json
+          if git diff --cached --quiet; then
+            echo "no change"; exit 0
+          fi
+          git commit -m "coin snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push origin HEAD:coin-snapshots
