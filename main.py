@@ -2284,6 +2284,53 @@ def watch_digest():
     print(f"[다이제스트] 임박{len(near)} 대기{len(waiting)} 무효{len(broken)} 만료{len(stale)}")
 
 
+def format_recheck_message(payload):
+    """v2.50 — 스캐너 홈 달력 "재확인 종목"(/api/user-events/due) → 텔레그램 본문.
+    종목 있는 일정은 트레이딩뷰 링크(KR 6자리·.KS/.KQ → KRX:코드, 그 외 심볼 그대로),
+    메모는 그 아래 한 줄씩. 종목 없는 일정은 제목만. 일정이 없으면 None(발송 안 함).
+    send_telegram이 parse_mode=HTML이라 사용자 입력은 전부 html.escape."""
+    events = (payload or {}).get("events") or []
+    if not events:
+        return None
+    date = (payload or {}).get("date") or ""
+    lines = [f"📅 <b>오늘 열어볼 종목</b> · {html.escape(date)}", ""]
+    for e in events:
+        title = html.escape(str(e.get("title") or ""))
+        tk = str(e.get("ticker") or "").upper()
+        tm = e.get("time")
+        head = f"<b>{html.escape(tm)}</b> " if tm else ""
+        if tk:
+            code = tk[:-3] if tk.endswith((".KS", ".KQ")) else tk
+            sym = f"KRX:{code}" if code.isdigit() and len(code) == 6 else code.replace(".", "")
+            url = f"https://www.tradingview.com/chart/?symbol={sym}"
+            lines.append(f"· {head}📌 <a href=\"{url}\">{html.escape(tk)}</a> {title}")
+        else:
+            lines.append(f"· {head}{title}")
+        memo = str(e.get("memo") or "").strip()
+        for ln in memo.splitlines():
+            if ln.strip():
+                lines.append(f"   ↳ {html.escape(ln.strip())}")
+    return "\n".join(lines)
+
+
+def check_recheck_events():
+    """v2.50 — 매일 08:45 KST(주말 포함: 날짜는 사용자가 고른 것). 스캐너 달력에서
+    오늘 날짜로 등록된 일정을 읽어 보낸다. 조회 실패는 로그만(다음 날 다시)."""
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/user-events/due", timeout=15, headers=_SCANNER_HEADERS)
+        payload = res.json()
+    except Exception as e:
+        print(f"[재확인] 조회 실패: {e}")
+        return
+    if not payload.get("ok"):
+        print(f"[재확인] 응답 오류: {payload.get('error')}")
+        return
+    msg = format_recheck_message(payload)
+    if msg:
+        send_telegram(msg)
+    print(f"[재확인] {payload.get('date')} {len(payload.get('events') or [])}건")
+
+
 def morning_summary():
     """아침 9시 요약"""
     if not MORNING_TICKERS:
@@ -2535,6 +2582,7 @@ schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 �
 schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
 schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아침 관찰 다이제스트
+schedule.every().day.at("08:45", "Asia/Seoul").do(check_recheck_events)  # v2.50 달력 재확인 종목(스캐너 /api/user-events/due)
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
 schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리 리포트 발송 감시
