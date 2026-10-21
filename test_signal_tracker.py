@@ -255,7 +255,7 @@ def test_suppress_still_confirm_bar(tmp_path):
     assert tr.suppress_reason(None) is None                     # 봉 못 받으면 판정 안 함
     # ② 확인봉(08:00~08:05) 고가−저가 = 0.015 / 시가 100 → 0.015% → 억제, 저장·기록은 함
     t0 = utc_ms(2026, 10, 16, 8, 0)
-    bar = {"t": t0, "T": t0 + 299_999, "o": 100.0, "h": 100.01, "l": 99.995, "c": 99.998}
+    bar = {"t": t0, "T": t0 + 299_999, "o": 100.0, "h": 100.05, "l": 99.95, "c": 99.985}   # v2.51 몸통 0.015%(고저 0.1%)
 
     def fetch(symbol, tf, limit=500, end_ms=None, start_ms=None):
         return [bar] if tf == "5m" else []

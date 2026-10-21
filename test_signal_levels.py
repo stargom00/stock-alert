@@ -92,7 +92,10 @@ def test_ref_swing_most_recent_beyond_entry():
     assert lv.ref_swing(bars, "short", 100.0, k=3) == 95.0     # 가장 최근 스윙 저점(idx11)
     assert lv.ref_swing(bars, "short", 94.0, k=3) is None
     assert lv.ref_swing(bars, "long", 100.0, k=3) == 103.0
-    assert lv.bar_range_pct({"o": 100.0, "h": 100.01, "l": 99.995}) == pytest.approx(0.015)
+    assert lv.bar_range_pct({"o": 100.0, "c": 100.015, "h": 100.05, "l": 99.95}) == pytest.approx(0.015)   # v2.51 몸통
+    # 채널 2026-10-22 낚시 캔들: 몸통 +0.01%, 고저 0.08% → 몸통 기준이라 미동(0.02% 미만)
+    fish = {"o": 83445.0, "c": 83451.0, "h": 83499.0, "l": 83430.1}
+    assert lv.bar_range_pct(fish) < 0.02
 
 
 def test_liquidation_price():

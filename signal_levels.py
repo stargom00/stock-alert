@@ -75,7 +75,7 @@ CONFIG = {
     "TP_ROI_LEV": _env_float("COIN_TP_ROI_LEV", "20"),           # 메시지 ROI·청산가 배율(격리)
     "SWING_K": _env_int("COIN_SWING_K", "3"),             # 양옆 K봉보다 낮/높아야 스윙 (참고 1m 직전 고점/저점)
     "LEVEL_LOOKBACK": _env_int("COIN_LEVEL_LOOKBACK", "200"),   # 스윙 탐색 봉 수
-    # v2.44 알림 억제(저장·추적은 함): ② 확인봉 (고가−저가)/시가 < 이 % → "미동 확인봉"
+    # v2.44 알림 억제(저장·추적은 함): ② 확인봉 몸통 |종가−시가|/시가 < 이 % → "미동 확인봉" (v2.51 몸통 기준)
     "STILL_BAR_PCT": _env_float("COIN_STILL_BAR_PCT", "0.02"),
     "CROSS_DUP_MIN": _env_float("COIN_CROSS_DUP_MIN", "10"),  # v2.40 다른 주기 같은 방향 발송 후 이 분 이내면 중복
     # (v2.42: 짧은 주기 발송 뒤 긴 주기는 중복 아님 → 확인 신호로 발송, 같은 포지션에 묶음)
@@ -269,8 +269,10 @@ def ref_swing(bars, side, entry, k=None):
 
 
 def bar_range_pct(b):
-    """v2.44 봉 변동폭 (고가−저가)/시가 %."""
-    return (b["h"] - b["l"]) / b["o"] * 100.0 if b["o"] else None
+    """v2.51 확인봉 "변동폭" = **몸통** |종가−시가|/시가 % (v2.44~v2.50은 고가−저가 전체 폭).
+    근거: 채널 2026-10-22 "0.01% 짜리 낚시 캔들은 패스" — 시 83,445 종 83,451(+0.01%)인데 고저 폭은 0.08%라
+    전체 폭 기준으론 안 걸러졌다. 꼬리 긴 도지성 확인봉을 거르려면 몸통이어야 한다. 이름은 그대로(저장 필드 호환)."""
+    return abs(b["c"] - b["o"]) / b["o"] * 100.0 if b["o"] else None
 
 
 def liquidation_price(side, entry, pct=None):
