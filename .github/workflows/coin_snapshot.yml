@@ -1,4 +1,4 @@
-# 코인 신호·추적·일지 스냅샷 → coin-snapshots 브랜치 (v2.47)
+# 코인 신호·추적·일지 스냅샷 → coin-snapshots 브랜치 (v2.48)
 #
 # 왜: Claude 예약 점검(cloud 세션)은 railway.app·binance 도메인이 egress 프록시에서
 # 403으로 막혀 /api/coin-* 를 직접 못 읽는다. GitHub은 읽힌다. 그래서 Actions가 대신
@@ -10,6 +10,12 @@
 #
 # 매시 45분(UTC) + 수동 실행(workflow_dispatch). 점검 직전에 수동 실행하면 최신본.
 # COIN_API_READ_TOKEN 시크릿이 있으면 X-Api-Read-Token 헤더로 보낸다(없으면 헤더 생략).
+#
+# v2.48(2026-11-02): btc_klines 추가 — BTCUSDT 일봉 120개·4시간봉 180개·1시간봉 168개
+# (binance.vision 공개 klines, 인증 없음). 매일 아침 점검의 "큰 흐름 한 줄"(고점·저점
+# 구조, 20일선 위/아래, 되돌림 비율)을 숫자로 만들기 위한 원천. 각 봉은 binance 원형
+# 배열 [open_ms, open, high, low, close, volume, close_ms, ...] 그대로 저장한다.
+# 마지막 봉은 미확정(진행 중) 봉이다 — 확정 봉만 쓰려면 close_ms < fetched_at 로 자른다.
 name: coin snapshot
 
 on:
@@ -68,7 +74,14 @@ jobs:
           for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions"):
               out[name] = get(f"{base}/api/{name}", hdr)
               time.sleep(0.5)
-          out["btc_price"] = get("https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT")
+          binance = "https://data-api.binance.vision/api/v3"
+          out["btc_price"] = get(f"{binance}/ticker/price?symbol=BTCUSDT")
+          # v2.48: 큰 흐름용 봉 데이터(마지막 봉은 미확정)
+          out["btc_klines"] = {}
+          for interval, limit in (("1d", 120), ("4h", 180), ("1h", 168)):
+              out["btc_klines"][interval] = get(
+                  f"{binance}/klines?symbol=BTCUSDT&interval={interval}&limit={limit}")
+              time.sleep(0.3)
 
           os.makedirs("snapshots/coin", exist_ok=True)
           with open("snapshots/coin/latest.json", "w", encoding="utf-8") as f:
@@ -79,6 +92,9 @@ jobs:
               r = out[name]
               n = r.get("body", {}).get("count") if isinstance(r.get("body"), dict) else None
               print(f"{name}: status={r.get('status')} count={n} err={r.get('error')}")
+          for interval, r in out["btc_klines"].items():
+              n = len(r["body"]) if isinstance(r.get("body"), list) else None
+              print(f"btc_klines[{interval}]: status={r.get('status')} bars={n} err={r.get('error')}")
           PY
 
       - name: Commit to coin-snapshots
