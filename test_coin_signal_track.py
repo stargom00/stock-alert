@@ -91,3 +91,82 @@ def test_track_open_fetches_and_saves(tmp_path):
     st.track_open(fetch, p, now_ms=FAR)
     assert calls == [("BTCUSDT", "1m", t["start_ms"])]
     assert st.load_tracks(p)[0]["result"] == "hit_tp"
+
+
+# ── v2.52 경로 기록 ──────────────────────────────────────────────────
+def _bars(t, n, h, l, start_k=1):
+    return [m1(t, k, h, l) for k in range(start_k, start_k + n)]
+
+
+def test_ext_keeps_going_after_72h_window_expires():
+    """72h에 만료된 건도 경로는 계속 기록된다 — 13건 '결말 모름'을 없애려는 목적."""
+    t = st.new_track(sig(1, "short", entry=100.0, tp=99.5))
+    far = t["start_ms"] + 400 * 3_600_000
+    flat = _bars(t, st.TRACK_HOURS * 60, 100.4, 100.3)   # 72h 내내 TP(99.5) 못 감
+    st.update_track(t, flat, far); st.update_ext(t, flat, far)
+    assert t["status"] == "done" and t["result"] == "expired"   # 72h 창은 만료
+    assert t["ext_status"] == "open" and t["ext_result"] is None  # 경로는 아직 열림
+    # 80시간째에 TP 도달
+    late = [m1(t, 80 * 60 + 5, 99.6, 99.4)]
+    st.update_ext(t, late, far)
+    assert t["ext_result"] is None and t["ext_tp_minutes"] == 80 * 60 + 5
+    st.update_ext(t, [m1(t, st.EXT_HOURS * 60, 100.0, 99.9)], far)
+    assert t["ext_status"] == "done" and t["ext_result"] == "hit_tp"
+    assert t["result"] == "expired" and t["mae_pct"] > 0        # 72h 창 값은 그대로
+
+
+def test_ext_does_not_touch_window_fields():
+    t = st.new_track(sig(2, "long", entry=100.0, tp=100.5))
+    bars = _bars(t, 3, 100.6, 99.0)
+    far = t["start_ms"] + 400 * 3_600_000
+    st.update_track(t, bars, far)
+    snap = {k: t[k] for k in ("status", "result", "mae_pct", "tp_minutes", "touch_1_ms", "touch_2_ms")}
+    st.update_ext(t, bars, far)
+    assert {k: t[k] for k in snap} == snap
+
+
+def test_mae_at_checkpoints_and_touch_levels():
+    t = st.new_track(sig(3, "long", entry=100.0, tp=200.0))     # TP 안 닿게
+    far = t["start_ms"] + 400 * 3_600_000
+    st.update_ext(t, _bars(t, 6 * 60, 100.1, 98.5), far)        # 첫 6시간 −1.5%
+    assert t["mae_at"]["6"] == pytest.approx(1.5) and "24" not in t["mae_at"]
+    st.update_ext(t, _bars(t, 18 * 60, 100.1, 95.0, start_k=6 * 60 + 1), far)  # 24h까지 −5%
+    assert t["mae_at"]["6"] == pytest.approx(1.5)               # 지난 체크포인트는 고정
+    assert t["mae_at"]["24"] == pytest.approx(5.0)
+    assert set(t["ext_touch"]) == {"1", "2", "3", "4", "5"}
+    assert t["ext_touch"]["1"] < t["ext_touch"]["5"]
+
+
+def test_ext_touch_only_before_tp():
+    t = st.new_track(sig(4, "short", entry=100.0, tp=99.5))
+    far = t["start_ms"] + 400 * 3_600_000
+    st.update_ext(t, [m1(t, 1, 100.5, 99.4)], far)              # 첫 봉에 −0.5% 뒤 TP
+    assert t["ext_tp_minutes"] == 1
+    st.update_ext(t, [m1(t, 2, 110.0, 109.0)], far)             # TP 뒤 +10% 역행
+    assert t["ext_touch"] == {} and t["ext_tp_minutes"] == 1
+    assert t["ext_mae_pct"] == pytest.approx(10.0)              # MAE는 계속 기록
+
+
+def test_ensure_ext_backfills_old_record_from_start():
+    """옛 레코드는 이미 72h를 다 훑어 포인터가 한참 앞서 있다(운영 파일의 실제 모양).
+    그래도 경로는 start부터 다시 받아야 체크포인트가 채워진다."""
+    t = st.new_track(sig(5))
+    old = {k: v for k, v in t.items() if not k.startswith(("ext_", "mae_at"))}
+    old.update(status="done", result="expired",
+               checked_until_ms=old["start_ms"] + st.TRACK_HOURS * 3_600_000)
+    assert st.ensure_ext(old) is True
+    assert old["ext_checked_until_ms"] == old["start_ms"] - 1   # 포인터가 아니라 start 기준
+    assert st.ensure_ext(old) is False
+    # 그 레코드도 조회 대상으로 잡혀야 한다(72h 창은 닫혔지만 경로는 열림)
+    assert st._pointer(old) == old["start_ms"] - 1
+
+
+def test_track_open_updates_both_phases(tmp_path):
+    p = str(tmp_path / "t.json")
+    s = sig(6, "long", entry=100.0, tp=100.5)
+    st.register(s, p)
+    t0 = st.load_tracks(p)[0]
+    st.track_open(lambda *a, **kw: _bars(t0, 2, 100.6, 99.4), p, now_ms=FAR)
+    t = st.load_tracks(p)[0]
+    assert t["result"] == "hit_tp" and t["ext_tp_minutes"] == 1
+    assert t["ext_status"] == "open" and t["ext_mae_pct"] == pytest.approx(0.6)
