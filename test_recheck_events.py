@@ -75,3 +75,18 @@ def test_check_uses_due_endpoint_and_skips_when_empty():
 
 def test_scheduled_daily():
     assert re.search(r'schedule\.every\(\)\.day\.at\("08:45", "Asia/Seoul"\)\.do\(check_recheck_events\)', SRC)
+
+
+def test_added_message_format_and_empty():
+    f = _load({"format_added_message"})["format_added_message"]
+    assert f({"events": []}) is None
+    msg = f({"events": [{"date": "2026-11-20", "ticker": "036890.KQ", "title": "📐 빗각×기준선 수렴 · 진성티이씨",
+                         "memo": "빗각 9,000 <x>"}]})
+    assert msg.startswith("📐 <b>빗각×기준선 수렴 — 달력에 추가</b> (1종목)")
+    assert 'symbol=KRX:036890">036890.KQ</a>' in msg and "<b>2026-11-20</b>" in msg
+    assert "↳ 빗각 9,000 &lt;x&gt;" in msg
+
+
+def test_added_scheduled_daily():
+    assert re.search(r'schedule\.every\(\)\.day\.at\("08:46", "Asia/Seoul"\)\.do\(check_added_events\)', SRC)
+    assert "/api/user-events/added" in SRC

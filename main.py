@@ -2331,6 +2331,47 @@ def check_recheck_events():
     print(f"[재확인] {payload.get('date')} {len(payload.get('events') or [])}건")
 
 
+def format_added_message(payload):
+    """v2.53 — 스캐너 v5.377 자동 일정(빗각×기준선 수렴, /api/user-events/added) → 텔레그램 본문.
+    사용자 지시 2026-11-07 "빗각이랑 사이가 좁아질때(변곡점 가까이 올때) 홈화면 달력에 추가해주고 알림봇으로 알림도 보내줘. 추가되면".
+    만나는 날(일정 날짜)엔 기존 재확인 알림(format_recheck_message)이 한 번 더 보낸다. 새 일정이 없으면 None."""
+    events = (payload or {}).get("events") or []
+    if not events:
+        return None
+    lines = [f"📐 <b>빗각×기준선 수렴 — 달력에 추가</b> ({len(events)}종목)", ""]
+    for e in events:
+        tk = str(e.get("ticker") or "").upper()
+        code = tk[:-3] if tk.endswith((".KS", ".KQ")) else tk
+        sym = f"KRX:{code}" if code.isdigit() and len(code) == 6 else code.replace(".", "")
+        url = f"https://www.tradingview.com/chart/?symbol={sym}"
+        title = html.escape(str(e.get("title") or ""))
+        lines.append(f"· <b>{html.escape(str(e.get('date') or ''))}</b> <a href=\"{url}\">{html.escape(tk)}</a> {title}")
+        memo = str(e.get("memo") or "").strip()
+        if memo:
+            lines.append(f"   ↳ {html.escape(memo)}")
+    return "\n".join(lines)
+
+
+def check_added_events():
+    """v2.53 — 매일 08:46 KST. 지난 24시간(직전 실행 시각부터) 스캐너가 새로 만든 수렴 일정을 보낸다.
+    스캐너 추적은 07:00 KST라 그날 아침에 추가된 건 바로 이 알림에 실린다(수동 갱신으로 낮에 추가된 건 다음 날 아침).
+    조회 실패는 로그만."""
+    since = (datetime.now(KST) - timedelta(hours=24)).isoformat()
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/user-events/added", params={"since": since}, timeout=15, headers=_SCANNER_HEADERS)
+        payload = res.json()
+    except Exception as e:
+        print(f"[수렴 일정] 조회 실패: {e}")
+        return
+    if not payload.get("ok"):
+        print(f"[수렴 일정] 응답 오류: {payload.get('error')}")
+        return
+    msg = format_added_message(payload)
+    if msg:
+        send_telegram(msg)
+    print(f"[수렴 일정] {len(payload.get('events') or [])}건 (since {since})")
+
+
 def morning_summary():
     """아침 9시 요약"""
     if not MORNING_TICKERS:
@@ -2583,6 +2624,7 @@ schedule.every(5).minutes.do(check_surge)
 schedule.every().day.at("09:00", "Asia/Seoul").do(morning_summary)
 schedule.every().day.at("08:50", "Asia/Seoul").do(watch_digest)      # v2.8 아침 관찰 다이제스트
 schedule.every().day.at("08:45", "Asia/Seoul").do(check_recheck_events)  # v2.50 달력 재확인 종목(스캐너 /api/user-events/due)
+schedule.every().day.at("08:46", "Asia/Seoul").do(check_added_events)  # v2.53 빗각×기준선 수렴 자동 일정(스캐너 /api/user-events/added)
 schedule.every().day.at("16:00", "Asia/Seoul").do(scheduled_trading_value_report)  # 장 마감 후 거래대금 (KST)
 schedule.every().day.at("09:10", "Asia/Seoul").do(check_opening_surge)  # v2.13 장 시작 10분 돈 유입 급증
 schedule.every(10).minutes.do(check_money_flow)  # v2.17 돈의 흐름 데일리 리포트 발송 감시
