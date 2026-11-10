@@ -1517,6 +1517,113 @@ def held_floor_digest():
         send_telegram(format_held_floor_digest(j))
         print(f"[보유 바닥선] 요약 {j.get('n_with_floor')}/{j.get('n')}종목")
 
+
+# ── 💥 조용하던 종목 거래량 폭발 (v2.55) ───────────────────────────
+# 사용자 지시 2026-11-10 "거래량이 마르고 조용하던 종목이 어는날 거래량이 터졌을때, 그거잡을수있어?" → 시점 c(장중+마감), 대상 c(KR+US).
+# 스캐너 v5.379 GET /api/quiet-surge?market=kr|us&mode=intraday|close. 판정 숫자는 전부 스캐너 쪽(quiet_surge.py, AI 어림값·측정 전).
+QUIET_SURGE_SLOTS = [   # (슬롯, 시장, 모드, 시간대, 시작 HH:MM) — 시작부터 30분 안의 첫 폴링에서 1회
+    ("kr-10", "kr", "intraday", "KST", "10:00"),
+    ("kr-13", "kr", "intraday", "KST", "13:00"),
+    ("kr-close", "kr", "close", "KST", "20:15"),     # KR 애프터 종료(20:00)·확정(20:10) 뒤
+    ("us-1030", "us", "intraday", "ET", "10:30"),
+    ("us-1300", "us", "intraday", "ET", "13:00"),
+    ("us-close", "us", "close", "ET", "16:30"),
+]
+QUIET_SURGE_WINDOW_MIN = 30
+_quiet_surge_fired = {}   # {"슬롯:날짜" 또는 "close-kr:세션날짜": True}
+
+
+def quiet_surge_due(now_kst, fired):
+    """지금 돌아야 할 슬롯 → [(키, 슬롯, 시장, 모드)]. 그 시장 시간대 기준 평일·시작~+30분, 아직 안 보낸 것만. 순수 함수."""
+    out = []
+    for slot, market, mode, tzname, hm in QUIET_SURGE_SLOTS:
+        local = now_kst if tzname == "KST" else now_kst.astimezone(ET)
+        if local.weekday() >= 5:
+            continue
+        h, m = map(int, hm.split(":"))
+        start = h * 60 + m
+        cur = local.hour * 60 + local.minute
+        if not (start <= cur < start + QUIET_SURGE_WINDOW_MIN):
+            continue
+        key = f"{slot}:{local.strftime('%Y-%m-%d')}"
+        if key not in fired:
+            out.append((key, slot, market, mode))
+    return out
+
+
+def _qs_link(ticker):
+    tk = str(ticker or "").upper()
+    code = tk[:-3] if tk.endswith((".KS", ".KQ")) else tk
+    sym = f"KRX:{code}" if len(code) == 6 and code[:4].isdigit() else code.replace(".", "")
+    return f'<a href="https://www.tradingview.com/chart/?symbol={sym}">{html.escape(tk)}</a>'
+
+
+def format_quiet_surge(payload):
+    """→ 텔레그램 본문 또는 None(장중 0건은 안 보낸다 — 로그만). 마감은 0건이어도 보낸다(조용한 0건 금지)."""
+    p = payload or {}
+    market, mode = p.get("market"), p.get("mode")
+    cur = "USD" if market == "us" else "KRW"
+    hits, follows = p.get("hits") or [], p.get("followups") or []
+    mk = "미국" if market == "us" else "국내"
+    if mode == "intraday":
+        if not hits:
+            return None
+        head = f"💥 <b>조용하던 종목 거래량 폭발 — {mk} 장중</b> (장 {p.get('elapsed_pct')}% 경과 · 잠정)"
+    else:
+        head = f"💥 <b>조용하던 종목 거래량 폭발 — {mk} 마감</b> ({html.escape(str(p.get('session_date')))} 확정)"
+    lines = [head, ""]
+    if not hits:
+        lines.append(f"오늘 폭발 0건 (대상 {p.get('n_checked')}종목)")
+    for r in hits[:15]:
+        chg = r.get("change_pct")
+        lines.append(f"· <b>{html.escape(str(r.get('name')))}</b> {_qs_link(r.get('ticker'))} {format_price(r['close'], cur)}"
+                     + (f" ({chg:+.1f}%)" if chg is not None else "")
+                     + f" · 거래량 {r['surge_ratio']:.1f}배{'(장중 환산)' if mode == 'intraday' else ''} · 직전 20일 {r['quiet_ratio']:.2f}")
+    if len(hits) > 15:
+        lines.append(f"…외 {len(hits) - 15}종목")
+    if mode == "close" and follows:
+        lines += ["", "<b>며칠 전 폭발 → 그 뒤 거래량</b> (폭발 전 20일 평균 대비 · 종가는 폭발일 대비)"]
+        for f in follows[:15]:
+            after = " · ".join(f"D+{k + 1} ×{a['vol_x']:.1f} ({a['close_vs_surge_pct']:+.1f}%)" for k, a in enumerate(f.get("after") or []))
+            lines.append(f"· {html.escape(str(f.get('name')))} {_qs_link(f.get('ticker'))} {html.escape(str(f.get('date'))[5:])} {f['surge_ratio']:.1f}배 → {after}")
+    lines += ["", "· 직전 20일 = 그 앞 60일 대비 거래량(0.6 이하 = 조용했다)",
+              "· 장중 값은 잠정 — 종가 확정 후 판단 · 돌파 성패는 다음 며칠 거래량으로",
+              "· 측정 전 관심 신호"]
+    return "\n".join(lines)
+
+
+def check_quiet_surge():
+    """v2.55 — 2분마다 슬롯을 확인해 해당 시각에만 스캐너를 부른다. 마감은 세션 날짜로 한 번 더 중복을 막는다(휴장일 재발송 방지)."""
+    now = datetime.now(KST)
+    for key, slot, market, mode in quiet_surge_due(now, _quiet_surge_fired):
+        try:
+            res = requests.get(f"{SCANNER_URL}/api/quiet-surge", params={"market": market, "mode": mode},
+                               timeout=180, headers=_SCANNER_HEADERS)
+            p = res.json()
+        except Exception as e:
+            print(f"[거래량 폭발] {slot} 조회 실패 ({now.strftime('%H:%M:%S')}): {e} — 다음 폴링에 재시도")
+            continue
+        if not p.get("ok"):
+            print(f"[거래량 폭발] {slot} 응답 오류: {p}")
+            continue
+        _quiet_surge_fired[key] = True
+        if p.get("reason") == "no_session_bar":
+            print(f"[거래량 폭발] {slot} 세션 봉 없음(휴장·캐시 낡음) — 발송 안 함")
+            _save_sent_log()
+            continue
+        if mode == "close":
+            skey = f"close-{market}:{p.get('session_date')}"
+            if skey in _quiet_surge_fired:
+                print(f"[거래량 폭발] {slot} 세션 {p.get('session_date')} 이미 보냄 — 건너뜀")
+                _save_sent_log()
+                continue
+            _quiet_surge_fired[skey] = True
+        _save_sent_log()
+        msg = format_quiet_surge(p)
+        if msg:
+            send_telegram(msg)
+        print(f"[거래량 폭발] {slot} 폭발 {p.get('n_hits')} · 후속 {len(p.get('followups') or [])} · 대상 {p.get('n_checked')}")
+
 # ── 📌 내 추적 트리거 알림 (v2.26) ──────────────────────────────
 # pullback 저널의 my_trigger_price/my_trigger_dir(pullback v5.220)을
 # 읽어 방향에 맞게 도달하면 1회 발송. 대상은 "📌 내 추적" 보드가 보여주는
@@ -2074,6 +2181,7 @@ def _save_sent_log():
                 "pivot_near": list(_pivot_near),
                 "ma_near_fired": _ma_near_fired,     # 티커(문자열) 키라 변환 불필요
                 "held_floor_fired": _held_floor_fired,   # v2.54 코드(문자열) 키
+                "quiet_surge_fired": _quiet_surge_fired,  # v2.55
                 "pullback_fired": _pullback_fired,
                 "dist_fired": _dist_fired,
                 "ma_break_fired": _ma_break_fired,
@@ -2230,6 +2338,7 @@ _target_fired.update(_sent_log_loaded.get("target_fired") or [])   # 리스트 �
 _pivot_near.update(_sent_log_loaded.get("pivot_near") or [])
 _ma_near_fired.update(_sent_log_loaded.get("ma_near_fired") or {})   # 티커(문자열) 키라 변환 불필요
 _held_floor_fired.update(_sent_log_loaded.get("held_floor_fired") or {})   # v2.54
+_quiet_surge_fired.update(_sent_log_loaded.get("quiet_surge_fired") or {})   # v2.55
 _pullback_fired.update(_restore_id_keyed(_sent_log_loaded.get("pullback_fired")))
 _dist_fired.update(_restore_id_keyed(_sent_log_loaded.get("dist_fired")))
 _ma_break_fired.update(_restore_id_keyed(_sent_log_loaded.get("ma_break_fired")))
@@ -2745,6 +2854,7 @@ schedule.every().day.at("16:10", "Asia/Seoul").do(check_distribution)  # 분산 
 schedule.every().day.at("16:10", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (종가 확정 후)
 schedule.every(2).minutes.do(check_ma_near)                            # 관찰 이평 접근 (v2.5, 장중)
 schedule.every(2).minutes.do(check_pullback_support)                   # 눌림 지지 진입 (v2.14, 장중)
+schedule.every(2).minutes.do(check_quiet_surge)                        # v2.55 조용하던 종목 거래량 폭발 (KR·US 장중·마감 슬롯)
 schedule.every(2).minutes.do(check_held_floors)                        # v2.54 보유 종목 기준선 접근·도달 (장중)
 schedule.every().day.at("08:52", "Asia/Seoul").do(held_floor_digest)   # v2.54 보유 종목 바닥선 감시 요약
 schedule.every(2).minutes.do(check_my_tracker)                         # 내 추적 트리거 도달 (v2.27, check_ma_near에서 분리)
