@@ -1392,6 +1392,131 @@ def check_ma_near():
     # 체크까지 같이 막히는 게 발견돼 분리함.
 
 
+
+# ── 🧱 보유 종목 바닥선(저점관리 기준선) 알림 (v2.54) ─────────────
+# 사용자 지시 2026-11-10 "내가 보유한 종목 바닥가가 오면 알림받는걸 먼저만들자. 알림봇으로".
+# 스캐너 v5.378 GET /api/lowpoint/held-floors = 보유(토스 잔고 + 저점 매매 기록) × 저점관리 행(기준선 active_line).
+HELD_FLOOR_NEAR_PCT = 3.0     # 기준선 +3% 안이면 "접근" — AI 어림값(측정 근거 없음, 사용자에게 고지)
+_held_floor_fired = {}        # {code: {"date": "YYYY-MM-DD", "kinds": ["near"|"touch"]}} — 종목·종류별 하루 1회
+
+
+def held_floor_decide(row, price, fired_kinds):
+    """→ "touch"(현재가 ≤ 기준선) | "near"(≤ 기준선×(1+3%)) | None. 순수 함수.
+    이미 이탈 중(state=broken)인 종목은 매일 반복 알림이 되므로 장중 알림 없이 아침 요약에만 둔다.
+    오늘 "touch"를 보냈으면 더 안 보내고, "near"만 보냈으면 "touch"는 한 번 더 보낸다."""
+    if not row.get("has_floor") or row.get("state") == "broken" or not price or price <= 0:
+        return None
+    line = row.get("active_line")
+    if not line or line <= 0 or "touch" in fired_kinds:
+        return None
+    if price <= line:
+        return "touch"
+    if price <= line * (1 + HELD_FLOOR_NEAR_PCT / 100) and "near" not in fired_kinds:
+        return "near"
+    return None
+
+
+def _held_cur(row):
+    return "USD" if row.get("mkt") == "US" else "KRW"
+
+
+def format_held_floor_alert(row, price, kind):
+    """보유 종목 기준선 접근·도달 알림 본문(HTML)."""
+    cur = _held_cur(row)
+    line = row["active_line"]
+    d = (price / line - 1) * 100
+    head = "🧱 <b>보유 종목 기준선 도달(장중)</b>" if kind == "touch" else f"🧱 <b>보유 종목 기준선 접근 (+{HELD_FLOOR_NEAR_PCT:g}% 안)</b>"
+    name = html.escape(str(row.get("name") or row.get("code")))
+    lines = [head, "", f"종목: <b>{name}</b> ({html.escape(str(row.get('code')))})",
+             f"현재 {format_price(price, cur)} · 기준선 {format_price(line, cur)} ({d:+.1f}%)"]
+    fl = row.get("floor_line")
+    if fl and abs(fl - line) > 1e-9:
+        lines.append(f"원래 바닥선 {format_price(fl, cur)}")
+    hit = row.get("hit") or {}
+    if hit.get("bar_date"):
+        lines.append(f"신호: {'주봉' if hit.get('tf') == 'week' else '월봉'} {html.escape(str(hit['bar_date']))}")
+    avg = row.get("avg_price")
+    if avg:
+        lines.append(f"평단 {format_price(avg, cur)} ({(price / avg - 1) * 100:+.1f}%)")
+    lines += ["", "· 장중 가격이다 — 지킴/이탈 판정은 종가로 한다", "· 저점매매는 손절 없음 · 평단 −50%면 같은 수량 물타기"]
+    return "\n".join(lines)
+
+
+def format_held_floor_digest(payload):
+    """아침 요약 — 감시 중인 보유 종목과 바닥선이 없는 종목을 둘 다 적는다(조용한 0건 금지)."""
+    rows = (payload or {}).get("rows") or []
+    labels = (payload or {}).get("state_label") or {}
+    reason = {"no_row": "추적 전", "no_hit": "저점 신호 없음", "no_floor": "바닥선 없음", "no_data": "시세 없음"}
+    with_f = [r for r in rows if r.get("has_floor")]
+    without = [r for r in rows if not r.get("has_floor")]
+    lines = [f"🧱 <b>보유 종목 바닥선 감시</b> · {len(with_f)}/{len(rows)}종목"]
+    if not rows:
+        lines.append("보유 종목 없음(토스 동기화·저점 매매 기록 기준)")
+    for r in sorted(with_f, key=lambda x: (x.get("dist_pct") is None, x.get("dist_pct") or 0)):
+        cur = _held_cur(r)
+        dist = r.get("dist_pct")
+        st = labels.get(r.get("state"), r.get("state") or "")
+        lines.append(f"· {html.escape(str(r.get('name') or r.get('code')))} 기준선 {format_price(r['active_line'], cur)}"
+                     + (f" · 종가 {format_price(r['last_close'], cur)}" if r.get("last_close") else "") + (f" ({dist:+.1f}%)" if dist is not None else "") + f" · {html.escape(st)}")
+    if without:
+        lines.append("바닥선 없음: " + ", ".join(f"{html.escape(str(r.get('name') or r.get('code')))}({reason.get(r.get('reason'), r.get('reason'))})"
+                                              for r in without))
+    if (payload or {}).get("checked_at"):
+        lines.append(f"<i>저점관리 추적 {html.escape(str(payload['checked_at'])[:16])}</i>")
+    return "\n".join(lines)
+
+
+def _fetch_held_floors():
+    try:
+        res = requests.get(f"{SCANNER_URL}/api/lowpoint/held-floors", timeout=15, headers=_SCANNER_HEADERS)
+        j = res.json()
+    except Exception as e:
+        print(f"[보유 바닥선] 조회 실패 ({datetime.now(KST).strftime('%H:%M:%S')}): {e}")
+        return None
+    if not j.get("ok"):
+        print(f"[보유 바닥선] 응답 오류: {j}")
+        return None
+    return j
+
+
+def check_held_floors():
+    """v2.54 — 장중 2분마다. 보유 종목 현재가가 저점관리 기준선 +3% 안/아래로 오면 종목·종류별 하루 1회 알림."""
+    if not (_kr_market_open() or _us_market_open()):
+        return
+    j = _fetch_held_floors()
+    if not j:
+        return
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    for row in j.get("rows") or []:
+        if not row.get("has_floor"):
+            continue
+        is_us = row.get("mkt") == "US"
+        if not (_us_market_open() if is_us else _kr_market_open()):
+            continue
+        code = str(row.get("code") or "")
+        rec = _held_floor_fired.get(code)
+        kinds = rec["kinds"] if rec and rec.get("date") == today else []
+        if "touch" in kinds:
+            continue
+        base = code.upper().split(".")[0]
+        q = _get_stock_data_yahoo(code) if is_us else get_kr_quote_naver(base)
+        price = (q or {}).get("price")
+        kind = held_floor_decide(row, price, kinds)
+        if not kind:
+            continue
+        _held_floor_fired[code] = {"date": today, "kinds": kinds + [kind]}
+        _save_sent_log()
+        send_telegram(format_held_floor_alert(row, price, kind))
+        print(f"  🧱 {row.get('name')} 기준선 {kind} ({price})")
+
+
+def held_floor_digest():
+    """v2.54 — 매일 08:52 KST 감시 목록 요약(바닥선 없는 보유 종목도 적는다)."""
+    j = _fetch_held_floors()
+    if j:
+        send_telegram(format_held_floor_digest(j))
+        print(f"[보유 바닥선] 요약 {j.get('n_with_floor')}/{j.get('n')}종목")
+
 # ── 📌 내 추적 트리거 알림 (v2.26) ──────────────────────────────
 # pullback 저널의 my_trigger_price/my_trigger_dir(pullback v5.220)을
 # 읽어 방향에 맞게 도달하면 1회 발송. 대상은 "📌 내 추적" 보드가 보여주는
@@ -1948,6 +2073,7 @@ def _save_sent_log():
                 "target_fired": list(_target_fired),
                 "pivot_near": list(_pivot_near),
                 "ma_near_fired": _ma_near_fired,     # 티커(문자열) 키라 변환 불필요
+                "held_floor_fired": _held_floor_fired,   # v2.54 코드(문자열) 키
                 "pullback_fired": _pullback_fired,
                 "dist_fired": _dist_fired,
                 "ma_break_fired": _ma_break_fired,
@@ -2103,6 +2229,7 @@ for _pid, _rec in (_sent_log_loaded.get("pos_fired") or {}).items():
 _target_fired.update(_sent_log_loaded.get("target_fired") or [])   # 리스트 원소는 JSON 왕복해도 int 유지(딕셔너리 키만 문자열화됨)
 _pivot_near.update(_sent_log_loaded.get("pivot_near") or [])
 _ma_near_fired.update(_sent_log_loaded.get("ma_near_fired") or {})   # 티커(문자열) 키라 변환 불필요
+_held_floor_fired.update(_sent_log_loaded.get("held_floor_fired") or {})   # v2.54
 _pullback_fired.update(_restore_id_keyed(_sent_log_loaded.get("pullback_fired")))
 _dist_fired.update(_restore_id_keyed(_sent_log_loaded.get("dist_fired")))
 _ma_break_fired.update(_restore_id_keyed(_sent_log_loaded.get("ma_break_fired")))
@@ -2618,6 +2745,8 @@ schedule.every().day.at("16:10", "Asia/Seoul").do(check_distribution)  # 분산 
 schedule.every().day.at("16:10", "Asia/Seoul").do(check_ma_break)      # 보유 이평 이탈 (종가 확정 후)
 schedule.every(2).minutes.do(check_ma_near)                            # 관찰 이평 접근 (v2.5, 장중)
 schedule.every(2).minutes.do(check_pullback_support)                   # 눌림 지지 진입 (v2.14, 장중)
+schedule.every(2).minutes.do(check_held_floors)                        # v2.54 보유 종목 기준선 접근·도달 (장중)
+schedule.every().day.at("08:52", "Asia/Seoul").do(held_floor_digest)   # v2.54 보유 종목 바닥선 감시 요약
 schedule.every(2).minutes.do(check_my_tracker)                         # 내 추적 트리거 도달 (v2.27, check_ma_near에서 분리)
 schedule.every().sunday.at("09:00", "Asia/Seoul").do(weekly_report)  # 주간 리포트 (v2.2)
 schedule.every(5).minutes.do(check_surge)
