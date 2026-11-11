@@ -84,3 +84,13 @@ def test_main_wiring():
     src = open("main.py", encoding="utf-8").read()
     assert "trendlines.register(schedule, get_stock_data, send_telegram)" in src
     assert 'if text in ("빗각", "빗각현황", "추세선"):' in src
+
+
+def test_close_digest_shows_note_on_event():
+    line = {**NV, "note": "박스 바닥 설명"}
+    msg = t.close_check("us", lambda tk: {"price": 155.0}, lambda m: None,
+                        datetime(2026, 11, 13, 6, 30, tzinfo=KST), [line], {"nv": {"side": "on"}}, persist=False)
+    assert "↳ 박스 바닥 설명" in msg
+    msg2 = t.close_check("us", lambda tk: {"price": 155.0}, lambda m: None,
+                         datetime(2026, 11, 13, 6, 30, tzinfo=KST), [line], {"nv": {"side": "below"}}, persist=False)
+    assert "↳" not in msg2

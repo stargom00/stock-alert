@@ -123,6 +123,8 @@ def format_close_digest(rows, market, on):
     for line, close, ev in rows:
         tag = f" ⚠️ <b>종가 {ev}</b>" if ev else ""
         out.append(fmt_line_row(line, close, on, market) + tag)
+        if ev and line.get("note"):
+            out.append(f"   ↳ {line['note']}")          # v2.57 상태가 바뀐 선은 설명을 같이
     out.append(f"· 이탈/돌파 = 종가가 선 ∓{BREAK_PCT:g}% 밖 (일봉 종가 · 금요일 요약 = 주봉 종가)")
     return "\n".join(out)
 
