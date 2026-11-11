@@ -615,6 +615,7 @@ HELP_MESSAGE = (
     "• 급등락 알림 (5분마다 확인)\n"
     "• 🚀 일지 대기종목 피벗 돌파 알림 (1분마다 확인)\n"
     "• 📌 내 추적 트리거 도달 알림 (장중 2분마다 확인, v2.26)\n"
+    "• 📐 빗각 접근(장중 선 ±3%) · 종가 점검(장 마감 뒤) — <code>빗각</code>으로 현황 (v2.56)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -627,6 +628,12 @@ def handle_message(text, chat_id):
     # 도움말 요청
     if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
         send_telegram(HELP_MESSAGE, chat_id)
+        return
+
+    # v2.56 빗각 추적 현황
+    if text in ("빗각", "빗각현황", "추세선"):
+        import trendlines
+        send_telegram(trendlines.status_text(get_stock_data), chat_id)
         return
 
     # 거래대금 조회
@@ -2873,6 +2880,8 @@ schedule.every().day.at("21:30", "Asia/Seoul").do(check_toss_sync)  # v2.20 (하
 register_macro_schedule(schedule)  # v2.31 매크로 아침 요약 (MACRO_TIME KST, 주말 포함)
 import signal_tracker  # v2.37 코인 선물 RSI 신호 (자체 판정·Webhook·추적·09:00 NZ 요약, HTTP :$PORT)
 signal_tracker.register(schedule, send_telegram)
+import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 하루 1회 · 장 마감 뒤 종가 점검(KR 20:20 KST · US 16:30 ET)
+trendlines.register(schedule, get_stock_data, send_telegram)
 
 check_alerts()
 
