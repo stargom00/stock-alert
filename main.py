@@ -616,6 +616,7 @@ HELP_MESSAGE = (
     "• 🚀 일지 대기종목 피벗 돌파 알림 (1분마다 확인)\n"
     "• 📌 내 추적 트리거 도달 알림 (장중 2분마다 확인, v2.26)\n"
     "• 📐 빗각 접근(장중 선 ±3%) · 종가 점검(장 마감 뒤) — <code>빗각</code>으로 현황 (v2.56)\n"
+    "• 📈 120·240일선 상향 돌파(장중 시도 · 종가 확정) — <code>이평</code> 현황 · <code>이평추가 티커</code> · <code>이평삭제 티커</code> (v2.58)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -631,6 +632,19 @@ def handle_message(text, chat_id):
         return
 
     # v2.56 빗각 추적 현황
+    # v2.58 120·240일선 상향 돌파 감시
+    if text in ("이평", "이평돌파", "이평현황"):
+        import ma_cross
+        send_telegram(ma_cross.status_text(get_stock_data), chat_id)
+        return
+    _mc = text.split()
+    if len(_mc) == 2 and _mc[0] in ("이평추가", "이평삭제"):
+        import ma_cross
+        _t = resolve_ticker(_mc[1]).upper()
+        lst = ma_cross.edit_list(_t, add=_mc[0] == "이평추가")
+        send_telegram(f"📈 {_mc[0][2:]}: {_t}\n감시 중: {', '.join(lst)}", chat_id)
+        return
+
     if text in ("빗각", "빗각현황", "추세선"):
         import trendlines
         send_telegram(trendlines.status_text(get_stock_data), chat_id)
@@ -2882,6 +2896,8 @@ import signal_tracker  # v2.37 코인 선물 RSI 신호 (자체 판정·Webhook�
 signal_tracker.register(schedule, send_telegram)
 import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 하루 1회 · 장 마감 뒤 종가 점검(KR 20:20 KST · US 16:30 ET)
 trendlines.register(schedule, get_stock_data, send_telegram)
+import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
+ma_cross.register(schedule, get_stock_data, send_telegram)
 
 check_alerts()
 
