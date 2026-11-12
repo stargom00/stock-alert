@@ -582,7 +582,10 @@ notify_alert_parse_problems(_alert_problems)
 
 
 def get_updates(offset=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?timeout=1"
+    # v2.61 my_chat_member 포함 — 기본 allowed_updates에 없어서 명시해야 받는다.
+    # 봇을 새 방에 넣었을 때 그 방의 chat id를 바로 알려주려는 용도(COIN_CHAT_ID 설정용).
+    url = (f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?timeout=1"
+           '&allowed_updates=["message","my_chat_member"]')
     if offset:
         url += f"&offset={offset}"
     try:
@@ -590,6 +593,19 @@ def get_updates(offset=None):
         return res.json().get("result", [])
     except:
         return []
+
+
+def chat_id_notice(chat_id, title=""):
+    """새 방에 들어갔을 때 보낼 안내. chat id를 그대로 복사할 수 있게."""
+    where = f" <b>{title}</b>" if title else ""
+    return ("\n".join([
+        f"👋 이 방{where}에 들어왔어요.",
+        f"chat id: <code>{chat_id}</code>",
+        "",
+        "코인 신호만 이 방으로 받으려면 Railway Variables에",
+        "<code>COIN_CHAT_ID</code> = 위 값 을 넣고 재배포하세요.",
+        "주식 알림은 기존 방에 그대로 갑니다.",
+    ]))
 
 def format_price(price, currency):
     symbol = "₩" if currency == "KRW" else "$"
@@ -631,6 +647,12 @@ def handle_message(text, chat_id):
     # 도움말 요청
     if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
         send_telegram(HELP_MESSAGE, chat_id)
+        return
+
+    # v2.61 이 방의 chat id (COIN_CHAT_ID 설정용). 그룹에서 봇이 이 말을 못 보면
+    # BotFather의 /setprivacy를 Disable로 바꿔야 한다.
+    if text in ("아이디", "방아이디", "chatid", "chat id"):
+        send_telegram(chat_id_notice(chat_id), chat_id)
         return
 
     # v2.60 매일 훈련 알림 명령(훈련 · 훈련시간 · 훈련끄기/켜기)
@@ -2918,6 +2940,14 @@ while True:
     updates = get_updates(offset=last_update_id)
     for update in updates:
         last_update_id = update["update_id"] + 1
+        cm = update.get("my_chat_member")
+        if cm:  # v2.61 방에 추가/승격됐을 때 chat id 안내
+            chat = cm.get("chat", {})
+            cid = str(chat.get("id", ""))
+            status = (cm.get("new_chat_member") or {}).get("status", "")
+            if cid and status in ("member", "administrator"):
+                send_telegram(chat_id_notice(cid, chat.get("title", "")), cid)
+            continue
         msg = update.get("message", {})
         text = msg.get("text", "")
         chat_id = str(msg.get("chat", {}).get("id", ""))

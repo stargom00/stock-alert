@@ -2,6 +2,20 @@
 
 v2.30 이전 이력은 git log 커밋 메시지 참고.
 
+## v2.61 — 새 방 chat id 안내 (2026-11-13)
+
+- 코인 신호를 주식 알림과 다른 방으로 보내는 건 원래 `COIN_CHAT_ID` 환경변수로 됐다
+  (`signal_tracker.register`가 코인 쪽 send를 전부 이 chat_id로 묶는다 — 자체판정·webhook·
+  신호기록·포지션추적·일일요약). 막히는 건 **그 방의 chat id를 알아내는 것**이었다.
+- `get_updates`가 `allowed_updates=["message","my_chat_member"]`를 명시한다. my_chat_member는
+  기본 목록에 없어서 안 쓰면 "방에 추가됨" 이벤트가 아예 안 온다.
+- 봇이 방에 추가·승격되면(`status` member/administrator) 그 방에 chat id와
+  `COIN_CHAT_ID` 설정 안내를 보낸다. 쫓겨난 경우(left/kicked)는 안 보낸다.
+- 폴백으로 `아이디`/`chatid` 명령도 그 방 chat id를 답한다. 단 그룹에서 봇이 일반 메시지를
+  못 보면(BotFather privacy 기본 ON) 이 명령은 안 먹는다 — 그래서 위 자동 안내가 주 경로다.
+- `test_chat_id_notice.py`가 안내 문구·allowed_updates·루프 분기를 고정한다(루프는 main.py
+  본문 조각을 그대로 떼어 실행 — 재구현 금지 원칙).
+
 ## v2.60 — 매일 훈련 알림 (2026-11-13)
 - 사용자 지시 "다 흩어져있는걸 모아야할거같아. 니가 나에게 알림을 보내고 내가 흩어져잇는걸 꺼내서 사용할수있는 시스템으로 바꿔줘. 이거 써봤자 또 까먹어".
 - `training.py`: 매일 기본 오클랜드 09:30(사용자 일정 "하루 시작 9시" 기준, AI 판단)에 요일별 오늘 할 일 하나 + 매매 훈련 홈 링크. 60분 창 · 하루 1회(DATA_DIR/training.json).
