@@ -618,6 +618,7 @@ HELP_MESSAGE = (
     "• 📐 빗각 접근(장중 선 ±3%) · 종가 점검(장 마감 뒤) — <code>빗각</code>으로 현황 (v2.56)\n"
     "• 📈 120·240일선 상향 돌파(장중 시도 · 종가 확정) — <code>이평</code> 현황 · <code>이평추가 티커</code> · <code>이평삭제 티커</code> (v2.58)\n"
     "• 📈 국내 전체 120·240일선 돌파 — 14:00 장중(잠정) · 20:20 마감 (v2.59)\n"
+    "• 📚 매일 훈련 알림(오늘 할 일 + 훈련 홈) — <code>훈련</code> · <code>훈련시간 09:30</code> · <code>훈련시간 10:00 한국</code> · <code>훈련끄기</code> (v2.60)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -630,6 +631,13 @@ def handle_message(text, chat_id):
     # 도움말 요청
     if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
         send_telegram(HELP_MESSAGE, chat_id)
+        return
+
+    # v2.60 매일 훈련 알림 명령(훈련 · 훈련시간 · 훈련끄기/켜기)
+    import training
+    _tr = training.handle(text)
+    if _tr:
+        send_telegram(_tr, chat_id)
         return
 
     # v2.56 빗각 추적 현황
@@ -2899,6 +2907,8 @@ import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 
 trendlines.register(schedule, get_stock_data, send_telegram)
 import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
 ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)  # v2.59 KR 전체 14:00·20:20 KST
+import training  # v2.60 매일 훈련 알림 — 요일별 오늘 할 일 + 매매 훈련 홈 링크(기본 오클랜드 09:30)
+training.register(schedule, send_telegram)
 
 check_alerts()
 
