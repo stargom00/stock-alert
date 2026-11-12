@@ -1,4 +1,4 @@
-"""120일선·240일선 상향 돌파 알림 — v2.58.
+"""120일선·240일선 상향 돌파 알림 — v2.58 (관심 종목·US) + v2.59 (KR 전체, 스캐너 /api/ma-cross).
 
 사용자 지시(2026-11-12): "알림봇으로 120평, 240평을 아래에서 위로 뚫을때 알림오게할수있어?"
 
@@ -261,7 +261,92 @@ def status_text(get_price, now_kst=None, tickers=None, fetch=fetch_daily):
     return "\n".join(out)
 
 
-def register(sched, get_price, send):
+# ── v2.59 KR 전체 (스캐너) ────────────────────────────────────────────
+# 사용자 지시(2026-11-12) "전종목은 무리인가? 코스피 코스닥". 봇이 2,000종목 일봉을 직접 받는 대신 스캐너 KR 캐시로 판정한
+# GET /api/ma-cross?mode=intraday|close(v5.381)를 하루 두 번 읽는다. 대상 = 스캐너 KR 유니버스(시총 1000억 이상, 스팩 제외).
+KR_SLOTS = (("kr-intra", "intraday", 14, 0), ("kr-close", "close", 20, 20))
+KR_WINDOW_MIN = 30
+KR_SHOW = 15
+
+
+def kr_due(now_kst, fired):
+    """지금 돌 슬롯 → [(키, 모드)]. 평일·시각~+30분·아직 안 보낸 것. 순수 함수."""
+    if now_kst.weekday() >= 5:
+        return []
+    cur = now_kst.hour * 60 + now_kst.minute
+    out = []
+    for slot, mode, h, m in KR_SLOTS:
+        key = f"{slot}:{now_kst.date()}"
+        if h * 60 + m <= cur < h * 60 + m + KR_WINDOW_MIN and key not in fired:
+            out.append((key, mode))
+    return out
+
+
+def _tv(ticker):
+    t = str(ticker or "").upper()
+    return f'<a href="https://www.tradingview.com/chart/?symbol=KRX:{t[:6]}">{t[:6]}</a>'
+
+
+def format_kr(p):
+    """스캐너 응답 → 텔레그램 본문 또는 None(장중 0건은 침묵). 마감은 0건도 보낸다."""
+    hits, n = p.get("hits") or {}, p.get("n_hits") or {}
+    total = sum(int(v or 0) for v in n.values())
+    if p.get("mode") == "intraday":
+        if not total:
+            return None
+        head = f"📈 <b>국내 전체 120·240일선 돌파 시도 — 장중</b> (장 {p.get('elapsed_pct')}% 경과 · 잠정)"
+    else:
+        head = f"📈 <b>국내 전체 120·240일선 상향 돌파 — 마감</b> ({p.get('session_date')} 확정)"
+    out = [head, f"대상 {p.get('n_checked')}종목 (시총 1000억 이상 · 스팩 제외)"]
+    for w in ("240", "120"):
+        rows = hits.get(w) or []
+        out += ["", f"<b>{w}일선</b> {int(n.get(w) or 0)}종목 (거래대금 순)"]
+        for r in rows[:KR_SHOW]:
+            chg = r.get("change_pct")
+            vx = r.get("vol_x")
+            out.append(f"· <b>{r.get('name')}</b> {_tv(r.get('ticker'))} {_fmt(r['close'], 'kr')}"
+                       + (f" ({chg:+.1f}%)" if chg is not None else "")
+                       + f" · 선 {r['dist_pct']:+.1f}%"
+                       + (f" · 거래량 {vx:.1f}배" if vx is not None else ""))
+        if int(n.get(w) or 0) > KR_SHOW:
+            out.append(f"…외 {int(n[w]) - KR_SHOW}종목")
+    out += ["", "· 거래량 = 직전 20일 평균 대비(장중은 경과 시간 환산)",
+            "· 장중은 잠정 — 종가로 판정, 돌파 성패는 다음 며칠 거래량",
+            "· 측정 전 관심 신호"]
+    return "\n".join(out)
+
+
+def check_kr(send, scanner_url, headers, now_kst=None, state=None, get=requests.get, persist=True):
+    now = now_kst or datetime.now(KST)
+    st = state if state is not None else _read(state_path(), {})
+    for key, mode in kr_due(now, st):
+        try:
+            p = get(f"{scanner_url}/api/ma-cross", params={"mode": mode}, timeout=180, headers=headers).json()
+        except Exception as e:
+            print(f"[이평돌파 KR] {key} 조회 실패: {e} — 다음 폴링에 재시도")
+            continue
+        if not p.get("ok"):
+            print(f"[이평돌파 KR] {key} 응답 오류: {p}")
+            continue
+        st[key] = True
+        if p.get("reason") == "no_session_bar":
+            print(f"[이평돌파 KR] {key} 세션 봉 없음(휴장·캐시 낡음) — 발송 안 함")
+            continue
+        if mode == "close":
+            skey = f"kr-close-session:{p.get('session_date')}"
+            if skey in st:
+                print(f"[이평돌파 KR] 세션 {p.get('session_date')} 이미 보냄 — 건너뜀")
+                continue
+            st[skey] = True
+        msg = format_kr(p)
+        if msg:
+            send(msg)
+        print(f"[이평돌파 KR] {key} 돌파 {p.get('n_hits')} · 대상 {p.get('n_checked')}")
+    if persist:
+        _write(state_path(), st)
+
+
+def register(sched, get_price, send, scanner_url=None, scanner_headers=None):
     def safe(fn, name):
         def run():
             try:
@@ -272,3 +357,5 @@ def register(sched, get_price, send):
     sched.every(5).minutes.do(safe(lambda: check_intraday(get_price, send), "장중"))
     sched.every().day.at("20:20", "Asia/Seoul").do(safe(lambda: close_check("kr", send), "KR 종가"))
     sched.every().day.at("16:30", "America/New_York").do(safe(lambda: close_check("us", send), "US 종가"))
+    if scanner_url:
+        sched.every(2).minutes.do(safe(lambda: check_kr(send, scanner_url, scanner_headers or {}), "KR 전체"))

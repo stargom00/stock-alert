@@ -123,7 +123,7 @@ def test_list_edit(tmp_path, monkeypatch):
 
 def test_registered_in_main():
     src = open(os.path.join(os.path.dirname(__file__), "main.py"), encoding="utf-8").read()
-    assert src.count("ma_cross.register(schedule, get_stock_data, send_telegram)") == 1
+    assert src.count("ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)") == 1
     assert src.count("ma_cross.status_text(get_stock_data)") == 1
 
 
@@ -140,3 +140,50 @@ def test_equality_boundaries():
     c_eq_prev = [10.0] * 121 + [11.0]        # 어제 종가 10 = 어제 이평 10
     assert not m.close_cross_up(c_eq_prev, 120)[0]
     assert m.close_cross_up(c, 120)[0]
+
+
+# ── v2.59 KR 전체 ───────────────────────────────────────────────────
+def _payload(mode="close", n240=1, n120=20, reason=None, session="2026-11-12"):
+    row = {"ticker": "034020.KS", "name": "두산에너빌리티", "close": 61000.0, "change_pct": 4.2, "dist_pct": 1.3, "vol_x": 2.4}
+    p = {"ok": True, "mode": mode, "session_date": session, "elapsed_pct": 75.0, "n_checked": 1800,
+         "hits": {"240": [row] * min(n240, 25), "120": [dict(row, vol_x=None)] * min(n120, 25)},
+         "n_hits": {"240": n240, "120": n120}}
+    if reason:
+        p["reason"] = reason
+    return p
+
+
+def test_kr_due_slots():
+    d = date(2026, 11, 12)                                   # 목
+    at = lambda h, mi: datetime(d.year, d.month, d.day, h, mi, tzinfo=m.KST)
+    assert m.kr_due(at(13, 59), {}) == []
+    assert m.kr_due(at(14, 0), {}) == [("kr-intra:2026-11-12", "intraday")]
+    assert m.kr_due(at(14, 30), {}) == []
+    assert m.kr_due(at(20, 25), {}) == [("kr-close:2026-11-12", "close")]
+    assert m.kr_due(at(20, 25), {"kr-close:2026-11-12": True}) == []
+    assert m.kr_due(datetime(2026, 11, 14, 14, 5, tzinfo=m.KST), {}) == []   # 토
+
+
+def test_format_kr_counts_and_silence():
+    msg = m.format_kr(_payload(n120=20))
+    assert msg.count("두산에너빌리티") == 1 + m.KR_SHOW and "…외 5종목" in msg and "240일선</b> 1종목" in msg
+    assert "거래량 2.4배" in msg and msg.count("거래량 ") == 2       # vol_x None 줄은 거래량 표기 없음(+ 안내 줄 1)
+    assert m.format_kr(_payload("intraday", 0, 0)) is None
+    assert "120일선</b> 0종목" in m.format_kr(_payload("close", 0, 0))
+
+
+def test_check_kr_dedupe_and_no_bar():
+    sent, st = [], {}
+    now = datetime(2026, 11, 12, 20, 21, tzinfo=m.KST)
+    get = lambda *a, **k: type("R", (), {"json": lambda self: _payload()})()
+    m.check_kr(sent.append, "http://x", {}, now_kst=now, state=st, get=get, persist=False)
+    m.check_kr(sent.append, "http://x", {}, now_kst=now, state=st, get=get, persist=False)
+    assert len(sent) == 1 and st["kr-close-session:2026-11-12"]
+    st2, sent2 = {}, []
+    nobar = lambda *a, **k: type("R", (), {"json": lambda self: _payload(reason="no_session_bar")})()
+    m.check_kr(sent2.append, "http://x", {}, now_kst=now, state=st2, get=nobar, persist=False)
+    assert sent2 == [] and st2 == {"kr-close:2026-11-12": True}
+    st3, sent3 = {}, []
+    boom = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))
+    m.check_kr(sent3.append, "http://x", {}, now_kst=now, state=st3, get=boom, persist=False)
+    assert st3 == {}                                         # 실패는 표시 안 함 → 다음 폴링 재시도

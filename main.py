@@ -617,6 +617,7 @@ HELP_MESSAGE = (
     "• 📌 내 추적 트리거 도달 알림 (장중 2분마다 확인, v2.26)\n"
     "• 📐 빗각 접근(장중 선 ±3%) · 종가 점검(장 마감 뒤) — <code>빗각</code>으로 현황 (v2.56)\n"
     "• 📈 120·240일선 상향 돌파(장중 시도 · 종가 확정) — <code>이평</code> 현황 · <code>이평추가 티커</code> · <code>이평삭제 티커</code> (v2.58)\n"
+    "• 📈 국내 전체 120·240일선 돌파 — 14:00 장중(잠정) · 20:20 마감 (v2.59)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
@@ -2897,7 +2898,7 @@ signal_tracker.register(schedule, send_telegram)
 import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 하루 1회 · 장 마감 뒤 종가 점검(KR 20:20 KST · US 16:30 ET)
 trendlines.register(schedule, get_stock_data, send_telegram)
 import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
-ma_cross.register(schedule, get_stock_data, send_telegram)
+ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)  # v2.59 KR 전체 14:00·20:20 KST
 
 check_alerts()
 
