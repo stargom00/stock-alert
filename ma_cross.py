@@ -290,12 +290,12 @@ def _tv(ticker):
 def digest_text(r):
     """v2.63 매물 소화 일수(스캐너 v5.382 overhang): 바로 위 +10% 가격대에서 지난 1년 거래된 물량 ÷ 평소(20일 평균) 거래량.
     AI 어림값 · 이미 판 물량을 못 빼서 실제보다 크게 나옴(상한). 표시 전용."""
-    d, dt = r.get("digest_days"), r.get("digest_days_today")
+    d = r.get("digest_days")
     if d is None:
         return ""
     if d < 0.5:
         return " · 위 매물 거의 없음"
-    return f" · 위 매물 소화 ~{d:.0f}일" + (f"(오늘 속도 {dt:.1f}일)" if dt is not None else "")
+    return f" · 위 매물 소화 ~{d:.0f}일"   # v2.66 오늘 속도 뺌 — 소화 일수 ÷ 거래량 배수라 새 정보가 없음(사용자 확인)
 
 
 def format_kr(p):
