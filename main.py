@@ -633,7 +633,7 @@ HELP_MESSAGE = (
     "• 📌 내 추적 트리거 도달 알림 (장중 2분마다 확인, v2.26)\n"
     "• 📐 빗각 접근(장중 선 ±3%) · 종가 점검(장 마감 뒤) — <code>빗각</code>으로 현황 (v2.56)\n"
     "• 📈 120·240일선 상향 돌파(장중 시도 · 종가 확정) — <code>이평</code> 현황 · <code>이평추가 티커</code> · <code>이평삭제 티커</code> (v2.58)\n"
-    "• 📈 국내 전체 120·240일선 돌파 — 14:00 장중(잠정) · 20:20 마감 (v2.59)\n"
+    "• 📈 국내 전체 120·240일선 돌파 — 14:00 장중(잠정) · 20:20 마감 (v2.59) · 지금 받기 <code>이평전체</code> / <code>이평장중</code> (v2.64)\n"
     "• 📚 매일 훈련 알림(오늘 할 일 + 훈련 홈) — <code>훈련</code> · <code>훈련시간 09:30</code> · <code>훈련시간 10:00 한국</code> · <code>훈련끄기</code> (v2.60)\n"
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
@@ -667,6 +667,10 @@ def handle_message(text, chat_id):
     if text in ("이평", "이평돌파", "이평현황"):
         import ma_cross
         send_telegram(ma_cross.status_text(get_stock_data), chat_id)
+        return
+    if text in ("이평전체", "이평 전체", "이평장중"):   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
+        import ma_cross
+        send_telegram(ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS, "intraday" if text == "이평장중" else "close"), chat_id)
         return
     _mc = text.split()
     if len(_mc) == 2 and _mc[0] in ("이평추가", "이평삭제"):

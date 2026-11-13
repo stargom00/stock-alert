@@ -359,6 +359,20 @@ def check_kr(send, scanner_url, headers, now_kst=None, state=None, get=requests.
         _write(state_path(), st)
 
 
+def on_demand(scanner_url, headers, mode="close", get=requests.get):
+    """v2.64 텔레그램 `이평전체` — 지금 스캐너 결과를 바로 받아 본문을 돌려준다(상태·중복 차단 안 건드림).
+    마감 모드는 확정 봉 기준(KR 20:10 KST 전이면 전 거래일), 0건이어도 보낸다."""
+    try:
+        p = get(f"{scanner_url}/api/ma-cross", params={"mode": mode}, timeout=180, headers=headers).json()
+    except Exception as e:
+        return f"📈 국내 전체 이평 돌파 조회 실패: {e}"
+    if not p.get("ok"):
+        return f"📈 국내 전체 이평 돌파 응답 오류: {p.get('error') or p}"
+    if p.get("reason") == "no_session_bar":
+        return "📈 국내 전체 이평 돌파: 이 시점의 확정 봉이 없어(휴장·캐시 갱신 중). 잠시 뒤 다시 보내 줘."
+    return format_kr(p) or "📈 지금은 돌파 종목이 없어."
+
+
 def register(sched, get_price, send, scanner_url=None, scanner_headers=None):
     def safe(fn, name):
         def run():

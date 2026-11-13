@@ -196,3 +196,14 @@ def test_digest_text():
     p = _payload()
     p["hits"]["240"][0] = dict(p["hits"]["240"][0], digest_days=12.0, digest_days_today=5.0)
     assert "위 매물 소화 ~12일(오늘 속도 5.0일)" in m.format_kr(p)
+
+
+def test_on_demand():
+    ok = lambda *a, **k: type("R", (), {"json": lambda self: _payload()})()
+    assert "상향 돌파 — 마감" in m.on_demand("http://x", {}, get=ok)
+    nob = lambda *a, **k: type("R", (), {"json": lambda self: _payload(reason="no_session_bar")})()
+    assert "확정 봉이 없어" in m.on_demand("http://x", {}, get=nob)
+    boom = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))
+    assert "조회 실패" in m.on_demand("http://x", {}, get=boom)
+    src = open("main.py", encoding="utf-8").read()
+    assert src.count("ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS") == 1
