@@ -377,6 +377,9 @@ def htf_opposite_check(bars, side, n=None, low=None, high=None):
     return {"opposite": at is not None, "at_ms": at, "n": n}
 
 
+PREV_DAY_BARS = 15   # 연속 일수를 세려고 받는 일봉 수(진행 중인 오늘 봉 포함) — 14일 넘는 연속은 14로 찍힌다
+
+
 def prev_day_check(day_bars, side, bar_close_ms):
     """v2.67 전일 일봉 방향(관찰용 꼬리표, 억제 안 함). 신호 시각까지 **마감된** 마지막 UTC 일봉만 본다.
     fade = 되돌림 쪽(음봉 뒤 롱 / 양봉 뒤 숏). 보합(시가 = 종가)이면 fade None.
@@ -386,10 +389,16 @@ def prev_day_check(day_bars, side, bar_close_ms):
     closed = [b for b in day_bars if b["T"] <= bar_close_ms]
     if not closed:
         return None
-    b = max(closed, key=lambda x: x["T"])
-    d = "up" if b["c"] > b["o"] else "down" if b["c"] < b["o"] else "flat"
+    closed.sort(key=lambda x: x["T"])
+    dirs = ["up" if x["c"] > x["o"] else "down" if x["c"] < x["o"] else "flat" for x in closed]
+    b, d = closed[-1], dirs[-1]
     fade = None if d == "flat" else (d == "down") == (side == "long")
-    return {"dir": d, "fade": fade, "day_open_ms": b["t"]}
+    streak = 0                       # v2.68 같은 방향 일봉이 어제까지 며칠 연속인가(받은 봉 수가 상한)
+    for x in reversed(dirs):
+        if x != d:
+            break
+        streak += 1
+    return {"dir": d, "fade": fade, "day_open_ms": b["t"], "streak": streak}
 
 
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
@@ -450,7 +459,7 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
     except Exception as e:
         out["errors"]["pullback"] = _err_text(e)
     try:
-        out["prev_day"] = prev_day_check(fetch(symbol, "1d", limit=3, end_ms=bar_close_ms), side, bar_close_ms)
+        out["prev_day"] = prev_day_check(fetch(symbol, "1d", limit=PREV_DAY_BARS, end_ms=bar_close_ms), side, bar_close_ms)
     except Exception as e:
         out["errors"]["prev_day"] = _err_text(e)
     htf = CONFIG["HTF_SIGNAL_TF"]

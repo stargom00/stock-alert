@@ -459,6 +459,9 @@ def test_watch_line_marks():
     assert f("long", "up", False, tr.RUN_WARN_FROM) == f"⚠️ 어제 양봉 뒤 롱 · ⚠️ 같은 방향 {tr.RUN_WARN_FROM}번째 (관찰)"
     assert f("short", "down", False, tr.RUN_WARN_FROM - 1) == f"⚠️ 어제 음봉 뒤 숏 · 같은 방향 {tr.RUN_WARN_FROM - 1}번째 ✓ (관찰)"
     assert f("short", "flat", None, 1) == "어제 보합 · 같은 방향 1번째 ✓ (관찰)"
+    assert tr.watch_line(base_sig(side="long", prev_day={"dir": "down", "fade": True, "day_open_ms": 0, "streak": 3},
+                                  run_n=1)) == "어제 음봉 3일째 ✓ · 같은 방향 1번째 ✓ (관찰)"     # v2.68
+    assert "일째" not in tr.watch_line(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0, "streak": 1}, run_n=1))
     assert tr.watch_line(base_sig()) is None                 # 옛 신호(필드 없음)는 줄 없음
     assert "(관찰)" in tr.format_signal_message(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0}, run_n=2))
 

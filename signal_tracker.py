@@ -285,6 +285,8 @@ def watch_line(sig):
     pd, side_ko = sig.get("prev_day"), _SIDE_KO[sig["side"]]
     if pd:
         candle = {"up": "양봉", "down": "음봉", "flat": "보합"}[pd["dir"]]
+        if (pd.get("streak") or 0) >= 2:          # v2.68 2일 이상 연속이면 일수 표시
+            candle += f" {pd['streak']}일째"
         parts.append(f"어제 {candle}" if pd["fade"] is None else
                      f"어제 {candle} ✓" if pd["fade"] else f"⚠️ 어제 {candle} 뒤 {side_ko}")
     n = sig.get("run_n")

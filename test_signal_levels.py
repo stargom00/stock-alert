@@ -223,10 +223,10 @@ def test_prev_day_check_uses_only_closed_day():
     day = lambda i, o, c: {"t": i * D, "T": (i + 1) * D - 1, "o": o, "h": max(o, c), "l": min(o, c), "c": c}
     bars = [day(0, 100, 110), day(1, 110, 100), day(2, 100, 130)]     # 양봉, 음봉, (오늘 진행 중: 양봉)
     now = 2 * D + 3_600_000                                           # 셋째 날 01:00
-    assert lv.prev_day_check(bars, "long", now) == {"dir": "down", "fade": True, "day_open_ms": D}
+    assert lv.prev_day_check(bars, "long", now) == {"dir": "down", "fade": True, "day_open_ms": D, "streak": 1}
     assert lv.prev_day_check(bars, "short", now)["fade"] is False
     assert lv.prev_day_check(bars, "short", D + 5)["fade"] is True    # 둘째 날엔 첫째 날(양봉)이 전일
-    assert lv.prev_day_check([day(0, 100, 100)], "long", D + 5) == {"dir": "flat", "fade": None, "day_open_ms": 0}
+    assert lv.prev_day_check([day(0, 100, 100)], "long", D + 5) == {"dir": "flat", "fade": None, "day_open_ms": 0, "streak": 1}
     assert lv.prev_day_check(bars, "long", D - 1 - 1) is None         # 마감된 일봉 없음
 
 
@@ -239,3 +239,12 @@ def test_build_context_fetches_prev_day():
         return []
     ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 95.0, D + 59_999, fetch=fetch)
     assert ctx["prev_day"]["dir"] == "down" and ctx["prev_day"]["fade"] is True
+
+
+def test_prev_day_streak_counts_closed_days_only():
+    D = 86_400_000
+    day = lambda i, o, c: {"t": i * D, "T": (i + 1) * D - 1, "o": o, "h": max(o, c), "l": min(o, c), "c": c}
+    bars = [day(0, 100, 110), day(1, 110, 105), day(2, 105, 100), day(3, 100, 90), day(4, 90, 80)]  # 양, 음, 음, 음, (오늘 음 진행 중)
+    assert lv.prev_day_check(bars, "long", 4 * D + 60_000)["streak"] == 3      # 오늘 봉은 안 센다
+    assert lv.prev_day_check(bars, "long", 2 * D + 60_000)["streak"] == 1
+    assert lv.prev_day_check(bars, "short", 1 * D + 60_000)["streak"] == 1     # 양봉 1일
