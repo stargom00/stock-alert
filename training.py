@@ -15,6 +15,7 @@ from datetime import datetime
 import pytz
 
 HUB_URL = "https://claude.ai/artifact/7yf8NRj7gefnok5fNWZFee"
+TODO_URL = "https://claude.ai/artifact/PhZpK3F9JJjB6PoDSiw9Ny"   # v2.65 슬기 도구함(오늘 할 일 포스트잇)
 TZ_ALIAS = {"한국": "Asia/Seoul", "서울": "Asia/Seoul", "뉴질랜드": "Pacific/Auckland", "오클랜드": "Pacific/Auckland"}
 DEFAULT = {"hm": "09:30", "tz": "Pacific/Auckland", "on": True, "last": ""}
 WINDOW_MIN = 60          # 봇이 잠깐 꺼져 있어도 이 시간 안이면 보낸다
@@ -60,6 +61,7 @@ def message(local_dt):
     t, d = DAYS[local_dt.weekday()]
     return (f"📚 <b>오늘 할 일 — {WD[local_dt.weekday()]}요일 · 10분</b>\n"
             f"<b>{t}</b>\n{d}\n\n"
+            f"✅ <a href=\"{TODO_URL}\">오늘 할 일 체크</a> (슬기 도구함 포스트잇)\n"
             f"👉 <a href=\"{HUB_URL}\">매매 훈련 홈 열기</a> (계획서·원칙 카드·문제가 다 여기)\n"
             f"· 매일: 주식 일지 한 줄 + 차트 사진(펜으로 산 자리·판 자리 표시)\n"
             f"· 사기 전에 계획서 5칸: ① 전략 ② 매수 ③ 무효선(종가) ④ 1차 매도 ⑤ 최종 매도")

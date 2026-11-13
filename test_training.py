@@ -20,7 +20,7 @@ def test_due_window_and_once_per_day(tmp_path):
     assert t.check(sent.append, at(2026, 11, 13, 9, 31), p)          # 금요일
     assert not t.check(sent.append, at(2026, 11, 13, 9, 45), p)      # 같은 날 두 번 안 보냄
     assert not t.check(sent.append, at(2026, 11, 13, 10, 31), p)     # 창(60분) 밖
-    assert len(sent) == 1 and "금요일" in sent[0] and "알림 종목으로 계획서 1장" in sent[0] and t.HUB_URL in sent[0]
+    assert len(sent) == 1 and "금요일" in sent[0] and "알림 종목으로 계획서 1장" in sent[0] and t.HUB_URL in sent[0] and t.TODO_URL in sent[0]
     assert t.check(sent.append, at(2026, 11, 14, 9, 30), p) and "주간 복기" in sent[-1]
 
 
