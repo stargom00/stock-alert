@@ -189,6 +189,9 @@ def format_signal_message(sig):
     hs_line = htf_signal_line(sig)
     if hs_line:
         lines.append(hs_line)
+    w_line = watch_line(sig)
+    if w_line:
+        lines.append(w_line)
     c = sig.get("cloud")
     if c:
         tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
@@ -201,9 +204,9 @@ def format_signal_message(sig):
     # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
     labels = {"bar": "확인봉", "ref": "1m 참고", "cloud": f"{CONFIG['CLOUD_TF']} 구름",
               "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI", "pullback": "되돌림",
-              "htf_signal": f"{CONFIG['HTF_SIGNAL_TF']} 반대 신호"}
+              "htf_signal": f"{CONFIG['HTF_SIGNAL_TF']} 반대 신호", "prev_day": "전일 일봉"}
     by_reason = {}
-    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal"):
+    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal", "prev_day"):
         if k in errs:
             by_reason.setdefault(errs[k], []).append(labels[k])
     for reason, what in by_reason.items():
@@ -257,6 +260,37 @@ def _cross_tf_refs(signals, symbol, tf, side, bar_close_ms):
 def _is_confirm(ref, tf, bar_close_ms):
     """짧은 주기(1m) 발송 뒤 긴 주기(5m)가 같은 방향으로 뜬 경우."""
     return TF_MS[tf] > TF_MS[ref["tf"]] and ref["bar_close_ms"] <= bar_close_ms
+
+
+# v2.67 같은 방향 연속 신호 경고 시작점. 출처: 2026-11-14 in-sample 분석(연속 5번째+ 132건 승률 73%·건당 −0.58%
+# vs 1~4번째 573건 87%·−0.04%, 손절 3%). 검증 전 어림값 — 4주 관찰 뒤 재판정(프로젝트 문서 §5 사전 등록).
+RUN_WARN_FROM = 5
+
+
+def run_count(signals, symbol, side):
+    """이 신호가 같은 방향 연속 몇 번째인가(발송된 신호 기준, 방향이 바뀌면 1부터)."""
+    n = 1
+    for s in sorted((x for x in signals if x.get("sent") and x["symbol"] == symbol),
+                    key=lambda x: x["bar_close_ms"], reverse=True):
+        if s["side"] != side:
+            break
+        n += 1
+    return n
+
+
+def watch_line(sig):
+    """v2.67 관찰 꼬리표 한 줄: 전일 일봉 방향 · 같은 방향 연속 n번째. 둘 다 없으면 None(옛 신호).
+    ✓ = 지난 4주 자료에서 나았던 쪽, ⚠️ = 나빴던 쪽. 검증 전이라 '(관찰)'을 붙인다."""
+    parts = []
+    pd, side_ko = sig.get("prev_day"), _SIDE_KO[sig["side"]]
+    if pd:
+        candle = {"up": "양봉", "down": "음봉", "flat": "보합"}[pd["dir"]]
+        parts.append(f"어제 {candle}" if pd["fade"] is None else
+                     f"어제 {candle} ✓" if pd["fade"] else f"⚠️ 어제 {candle} 뒤 {side_ko}")
+    n = sig.get("run_n")
+    if n:
+        parts.append(f"⚠️ 같은 방향 {n}번째" if n >= RUN_WARN_FROM else f"같은 방향 {n}번째 ✓")
+    return " · ".join(parts) + " (관찰)" if parts else None
 
 
 def cross_tf_duplicate(signals, symbol, tf, side, bar_close_ms):
@@ -313,6 +347,8 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
             "htf_signal": ctx.get("htf_signal"),                   # v2.49 큰 주기 반대 신호(경고만)
+            "prev_day": ctx.get("prev_day"),                       # v2.67 전일 일봉 방향(관찰)
+            "run_n": None,                                         # v2.67 같은 방향 연속 n번째(발송 신호만)
             # v2.43 되돌림(통계용, 억제 안 함). 조회 실패면 셋 다 None
             "pullback_ok": (ctx.get("pullback") or {}).get("pullback_ok"),
             "ref_extreme": (ctx.get("pullback") or {}).get("ref_extreme"),
@@ -337,6 +373,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
         }
         pre_msgs = []
         if sig["sent"]:
+            sig["run_n"] = run_count(signals, symbol, side)
             bind = ref.get("position_id") if ref else None
             action, line, pre_msgs, pid = cp.on_signal(sig, fetch, path=pos_path, now_ms=now_ms,
                                                        bind_pid=bind)

@@ -107,7 +107,7 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     sent = []
     sig = tr.ingest_signal("BTCUSDT", "1m", "long", 80855.7, utc_ms(2026, 10, 15, 10, 47),
                            "webhook", sent.append, fetch_451, str(tmp_path / "s.json"))
-    assert set(sig["errors"]) == {"bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal"}   # v2.49 15m 반대 신호 포함
+    assert set(sig["errors"]) == {"bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal", "prev_day"}   # v2.49 · v2.67
     assert (sig["tp"], sig["suppressed"]) == (pytest.approx(80855.7 * 1.005), False)   # TP는 조회 불필요
     assert (sig["pullback_ok"], sig["ref_extreme"], sig["dist_pct"]) == (None, None, None)
     lines = sent[0].split("\n")
@@ -117,8 +117,9 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
         "",
         "<b>판정</b>",
         "되돌림 —",
+        "같은 방향 1번째 ✓ (관찰)",                                  # v2.67 전일 일봉은 조회 실패라 빠짐
         "30m 구름 — · 2h RSI —",
-        "⚠️ 확인봉·1m 참고·30m 구름·2h RSI·되돌림·15m 반대 신호 조회 실패: "
+        "⚠️ 확인봉·1m 참고·30m 구름·2h RSI·되돌림·15m 반대 신호·전일 일봉 조회 실패: "
         "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
         "포지션: 신규 1차 #P1",
         "",
@@ -440,3 +441,40 @@ def test_opposite_signal_sent_with_note_and_counted(tmp_path):
     assert tr.signal_counts(tr.load_signals(p), t0 + 600_000, 7)["opposite"] == 1
     assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1, 2]        # 발송됐으니 추적도
     assert tr.is_duplicate(tr.load_signals(p), "BTCUSDT", "5m", "long", t0 + 2 * 300_000)
+
+
+# ── v2.67 관찰 꼬리표: 전일 일봉 · 같은 방향 연속 ──
+
+def test_run_count_resets_on_side_change_and_ignores_unsent():
+    mk = lambda i, side, sent=True, sym="BTCUSDT": {"symbol": sym, "side": side, "sent": sent, "bar_close_ms": i}
+    hist = [mk(1, "long"), mk(2, "short"), mk(3, "short"), mk(4, "long", sent=False), mk(5, "short", sym="ETHUSDT")]
+    assert tr.run_count(hist, "BTCUSDT", "short") == 3       # 미발송 롱·다른 심볼은 끊지 않는다
+    assert tr.run_count(hist, "BTCUSDT", "long") == 1
+    assert tr.run_count([], "BTCUSDT", "long") == 1
+
+
+def test_watch_line_marks():
+    f = lambda side, d, fade, n: tr.watch_line(base_sig(side=side, prev_day={"dir": d, "fade": fade, "day_open_ms": 0}, run_n=n))
+    assert f("long", "down", True, 3) == "어제 음봉 ✓ · 같은 방향 3번째 ✓ (관찰)"
+    assert f("long", "up", False, tr.RUN_WARN_FROM) == f"⚠️ 어제 양봉 뒤 롱 · ⚠️ 같은 방향 {tr.RUN_WARN_FROM}번째 (관찰)"
+    assert f("short", "down", False, tr.RUN_WARN_FROM - 1) == f"⚠️ 어제 음봉 뒤 숏 · 같은 방향 {tr.RUN_WARN_FROM - 1}번째 ✓ (관찰)"
+    assert f("short", "flat", None, 1) == "어제 보합 · 같은 방향 1번째 ✓ (관찰)"
+    assert tr.watch_line(base_sig()) is None                 # 옛 신호(필드 없음)는 줄 없음
+    assert "(관찰)" in tr.format_signal_message(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0}, run_n=2))
+
+
+def test_ingest_records_run_n_and_prev_day(tmp_path):
+    D = 86_400_000
+    t0 = utc_ms(2026, 10, 15, 8, 0)
+    def fetch(symbol, tf, limit=500, end_ms=None, start_ms=None):
+        if tf == "1d":
+            d0 = t0 // D * D - D
+            return [{"t": d0, "T": d0 + D - 1, "o": 100.0, "h": 120.0, "l": 99.0, "c": 118.0}]   # 어제 양봉
+        return []
+    p, sent = str(tmp_path / "s.json"), []
+    ing = lambda k, side: tr.ingest_signal("BTCUSDT", "5m", side, 100.0, t0 + k * 12 * 300_000, "self", sent.append, fetch, p)
+    a, b, c = ing(0, "short"), ing(1, "short"), ing(2, "long")
+    assert (a["run_n"], b["run_n"], c["run_n"]) == (1, 2, 1)
+    assert a["prev_day"]["fade"] is True and c["prev_day"]["fade"] is False
+    assert "어제 양봉 ✓ · 같은 방향 2번째 ✓ (관찰)" in sent[1]
+    assert "⚠️ 어제 양봉 뒤 롱" in sent[2]

@@ -377,6 +377,21 @@ def htf_opposite_check(bars, side, n=None, low=None, high=None):
     return {"opposite": at is not None, "at_ms": at, "n": n}
 
 
+def prev_day_check(day_bars, side, bar_close_ms):
+    """v2.67 전일 일봉 방향(관찰용 꼬리표, 억제 안 함). 신호 시각까지 **마감된** 마지막 UTC 일봉만 본다.
+    fade = 되돌림 쪽(음봉 뒤 롱 / 양봉 뒤 숏). 보합(시가 = 종가)이면 fade None.
+    근거: 2026-11-14 추적 705건 in-sample 분석(프로젝트 문서 코인-신호-필터-분석 §5) —
+    fade 341건 건당 +0.10% vs 반대 364건 −0.36%(손절 3%). 검증 전이라 표시만 한다.
+    마감된 일봉이 없으면 None."""
+    closed = [b for b in day_bars if b["T"] <= bar_close_ms]
+    if not closed:
+        return None
+    b = max(closed, key=lambda x: x["T"])
+    d = "up" if b["c"] > b["o"] else "down" if b["c"] < b["o"] else "flat"
+    fade = None if d == "flat" else (d == "down") == (side == "long")
+    return {"dir": d, "fade": fade, "day_open_ms": b["t"]}
+
+
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게).
@@ -390,6 +405,7 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
     out = {"tp": tp_price(side, entry, pct), "tp_pct": pct,
            "confirm_range_pct": None, "ref_swing": None,
            "cloud": None, "htf_rsi": None, "pullback": None, "entry_spot": None,
+           "prev_day": None,     # v2.67 {"dir","fade","day_open_ms"} 전일 일봉 방향(관찰)
            "htf_signal": None,   # v2.49 {"tf","opposite","at_ms","n"} — 신호 주기가 HTF 이상이면 None(해당 없음)
            "errors": {}}   # {"bar"|"ref"|"cloud"|"htf_rsi"|"pullback"|"htf_signal": 사유}
     bars = []
@@ -433,6 +449,10 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
         out["pullback"] = pullback_check(closed, side, cmp_entry)
     except Exception as e:
         out["errors"]["pullback"] = _err_text(e)
+    try:
+        out["prev_day"] = prev_day_check(fetch(symbol, "1d", limit=3, end_ms=bar_close_ms), side, bar_close_ms)
+    except Exception as e:
+        out["errors"]["prev_day"] = _err_text(e)
     htf = CONFIG["HTF_SIGNAL_TF"]
     if TF_MS.get(tf, 0) < TF_MS.get(htf, 0):
         try:

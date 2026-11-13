@@ -196,7 +196,7 @@ def test_build_context_records_reasons():
 
     ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 100.0, 59_999, fetch=fetch)
     assert ctx["errors"] == {k: "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)"
-                             for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal")}   # v2.49
+                             for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal", "prev_day")}   # v2.49 · v2.67
     assert lv.price_basis() == "현물"
     ctx15 = lv.build_signal_context("BTCUSDT", "15m", "long", 100.0, 899_999, fetch=fetch)
     assert "htf_signal" not in ctx15["errors"] and ctx15["htf_signal"] is None       # 15m 신호엔 해당 없음
@@ -215,3 +215,27 @@ def test_htf_opposite_check():
     assert lv.htf_opposite_check(bars[:5], "short", n=3)["opposite"] is False  # RSI 미수렴 → 신호 없음
 
 
+
+
+def test_prev_day_check_uses_only_closed_day():
+    """v2.67 진행 중인 오늘 봉이 아니라 마감된 마지막 일봉으로 판정한다(장중 값은 잠정치)."""
+    D = 86_400_000
+    day = lambda i, o, c: {"t": i * D, "T": (i + 1) * D - 1, "o": o, "h": max(o, c), "l": min(o, c), "c": c}
+    bars = [day(0, 100, 110), day(1, 110, 100), day(2, 100, 130)]     # 양봉, 음봉, (오늘 진행 중: 양봉)
+    now = 2 * D + 3_600_000                                           # 셋째 날 01:00
+    assert lv.prev_day_check(bars, "long", now) == {"dir": "down", "fade": True, "day_open_ms": D}
+    assert lv.prev_day_check(bars, "short", now)["fade"] is False
+    assert lv.prev_day_check(bars, "short", D + 5)["fade"] is True    # 둘째 날엔 첫째 날(양봉)이 전일
+    assert lv.prev_day_check([day(0, 100, 100)], "long", D + 5) == {"dir": "flat", "fade": None, "day_open_ms": 0}
+    assert lv.prev_day_check(bars, "long", D - 1 - 1) is None         # 마감된 일봉 없음
+
+
+def test_build_context_fetches_prev_day():
+    D = 86_400_000
+    def fetch(symbol, tf, limit=500, end_ms=None, start_ms=None):
+        if tf == "1d":
+            return [{"t": 0, "T": D - 1, "o": 100.0, "h": 101.0, "l": 90.0, "c": 91.0},
+                    {"t": D, "T": 2 * D - 1, "o": 91.0, "h": 99.0, "l": 90.0, "c": 98.0}]   # 오늘(진행 중)
+        return []
+    ctx = lv.build_signal_context("BTCUSDT", "1m", "long", 95.0, D + 59_999, fetch=fetch)
+    assert ctx["prev_day"]["dir"] == "down" and ctx["prev_day"]["fade"] is True
