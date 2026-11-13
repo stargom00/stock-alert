@@ -187,3 +187,12 @@ def test_check_kr_dedupe_and_no_bar():
     boom = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))
     m.check_kr(sent3.append, "http://x", {}, now_kst=now, state=st3, get=boom, persist=False)
     assert st3 == {}                                         # 실패는 표시 안 함 → 다음 폴링 재시도
+
+
+def test_digest_text():
+    assert m.digest_text({"digest_days": 3.6, "digest_days_today": 1.2}) == " · 위 매물 소화 ~4일(오늘 속도 1.2일)"
+    assert m.digest_text({"digest_days": 0.2, "digest_days_today": 0.1}) == " · 위 매물 거의 없음"
+    assert m.digest_text({}) == ""
+    p = _payload()
+    p["hits"]["240"][0] = dict(p["hits"]["240"][0], digest_days=12.0, digest_days_today=5.0)
+    assert "위 매물 소화 ~12일(오늘 속도 5.0일)" in m.format_kr(p)

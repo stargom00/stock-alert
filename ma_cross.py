@@ -287,6 +287,17 @@ def _tv(ticker):
     return f'<a href="https://www.tradingview.com/chart/?symbol=KRX:{t[:6]}">{t[:6]}</a>'
 
 
+def digest_text(r):
+    """v2.63 매물 소화 일수(스캐너 v5.382 overhang): 바로 위 +10% 가격대에서 지난 1년 거래된 물량 ÷ 평소(20일 평균) 거래량.
+    AI 어림값 · 이미 판 물량을 못 빼서 실제보다 크게 나옴(상한). 표시 전용."""
+    d, dt = r.get("digest_days"), r.get("digest_days_today")
+    if d is None:
+        return ""
+    if d < 0.5:
+        return " · 위 매물 거의 없음"
+    return f" · 위 매물 소화 ~{d:.0f}일" + (f"(오늘 속도 {dt:.1f}일)" if dt is not None else "")
+
+
 def format_kr(p):
     """스캐너 응답 → 텔레그램 본문 또는 None(장중 0건은 침묵). 마감은 0건도 보낸다."""
     hits, n = p.get("hits") or {}, p.get("n_hits") or {}
@@ -307,10 +318,12 @@ def format_kr(p):
             out.append(f"· <b>{r.get('name')}</b> {_tv(r.get('ticker'))} {_fmt(r['close'], 'kr')}"
                        + (f" ({chg:+.1f}%)" if chg is not None else "")
                        + f" · 선 {r['dist_pct']:+.1f}%"
-                       + (f" · 거래량 {vx:.1f}배" if vx is not None else ""))
+                       + (f" · 거래량 {vx:.1f}배" if vx is not None else "")
+                       + digest_text(r))
         if int(n.get(w) or 0) > KR_SHOW:
             out.append(f"…외 {int(n[w]) - KR_SHOW}종목")
     out += ["", "· 거래량 = 직전 20일 평균 대비(장중은 경과 시간 환산)",
+            "· 매물 소화 = 바로 위 +10% 가격대에서 지난 1년 거래된 물량 ÷ 평소 하루 거래량(어림값 · 실제보다 크게 나옴)",
             "· 장중은 잠정 — 종가로 판정, 돌파 성패는 다음 며칠 거래량",
             "· 측정 전 관심 신호"]
     return "\n".join(out)
