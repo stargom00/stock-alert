@@ -1,0 +1,42 @@
+# 급등 숏 설계 v2 종이 매매 → spike-paper 브랜치 paper/ledger.json (v2.76, 2026-11-14). 주문 없음.
+# 규칙·이유는 tools/spike_paper.py 머리말. data.binance.vision 일별 파일이 하루 늦게 올라오므로
+# 하루 두 번(UTC 04:20, 10:20) 돌려 밀린 날을 따라잡는다. main에는 아무것도 커밋하지 않는다.
+name: spike paper
+
+on:
+  schedule:
+    - cron: '20 4,10 * * *'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/spike_paper.yml', 'tools/spike_paper.py']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: spike-paper
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore ledger
+        run: |
+          mkdir -p out/paper
+          curl -sf -o out/paper/ledger.json "https://raw.githubusercontent.com/${{ github.repository }}/spike-paper/paper/ledger.json?t=$(date +%s)" \
+            -H "Authorization: token ${{ github.token }}" || echo "원장 없음 — 새로 시작"
+      - name: Record
+        run: python3 tools/spike_paper.py out/paper/ledger.json
+      - name: Commit to spike-paper
+        run: |
+          cd out
+          git init -q -b spike-paper
+          git config user.name "spike-paper[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add paper
+          git commit -q -m "spike paper $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" spike-paper
