@@ -2,6 +2,11 @@
 
 v2.30 이전 이력은 git log 커밋 메시지 참고.
 
+## v2.78 — 급등 숏 자리 실시간 알림 (2026-11-14)
+- `spike_alert.py`: 1분마다 Bitget USDT 선물 전 종목을 보고, 설계 v2 조건(1시간 +40% & 볼린저 +10% 또는 5일선 +30%)이 오면 코인 방으로 한 번 알린다. 같은 종목 48시간 차단(파일에 남김). 주문 없음. `SPIKE_ALERTS=0`이면 끔.
+- 왜 Bitget: Railway에서 binance 선물은 451(v2.77 진단). Bitget은 채널 알림 종목의 80%를 덮는다 — 나머지는 알림이 안 온다(가상 기록에는 잡힘). 바이낸스에 없는 종목은 건너뛴다(목록은 `spike-paper` 브랜치 `paper/symbols.json`, 못 읽으면 알림에 "상장 미확인").
+- 규칙 숫자·지표 계산은 `tools/spike_paper.py`에서 import(사본 없음). 응답 모양은 실제 Bitget 응답 픽스처로 고정.
+
 ## v2.77 — 선물 시세 API 도달 진단 (2026-11-14)
 - `net_probe.py`, `GET /api/net-probe`(읽기 토큰), `net_probe.yml`: 급등 숏 알림을 실시간으로 계산할 곳을 고르려고 Railway·Actions 양쪽에서 binance fapi와 다른 거래소 공개 시세가 닿는지 실제로 확인한다. 읽기 전용, 알림·주문 없음.
 

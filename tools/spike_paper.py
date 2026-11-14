@@ -165,6 +165,9 @@ def run(ledger_path, today=None, start=None, until=None):
     syms = [s for s in syms if s.endswith("USDT") and "_" not in s]
     if len(syms) < 200:
         raise SystemExit(f"종목 목록이 너무 적다({len(syms)}) — 원천 문제. 기록하지 않는다.")
+    os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
+    with open(os.path.join(os.path.dirname(ledger_path) or ".", "symbols.json"), "w", encoding="utf-8") as f:
+        json.dump({"symbols": syms, "updated": today.isoformat()}, f)      # v2.78 봇 알림이 바이낸스 상장 여부를 본다
     while d < today:
         if not fetch_5m("BTCUSDT", d):                    # 그날 파일이 아직 안 올라왔다 — 다음 실행에서
             print(f"{d} 파일 미발행 — 중단", flush=True)

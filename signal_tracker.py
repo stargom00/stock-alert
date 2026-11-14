@@ -709,6 +709,9 @@ def register(sched, send_telegram):
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
         _safe(lambda: daily_summary(sig_send), "요약"))
     sched.every(5).minutes.do(_safe(lambda: coin_trend.check(send), "50일선"))   # v2.71 이것만 기본으로 발송
+    if os.environ.get("SPIKE_ALERTS", "1").strip().lower() not in ("0", "false", "no", "off"):
+        import spike_alert                                                      # v2.78 급등 숏 자리 알림(주문 없음)
+        sched.every(1).minutes.do(_safe(lambda: spike_alert.check(send), "급등숏"))
     try:
         import coin_http
         coin_http.start_server()

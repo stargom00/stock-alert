@@ -122,3 +122,5 @@ def test_run_end_to_end(tmp_path, monkeypatch):
     assert (t["sym"], t["entry"], t["result"], t["fund_pct"]) == ("AUSDT", 1.44, "tp", pytest.approx(-0.3))
     sp.run(p, today=date(2026, 11, 17))                             # 다시 돌려도 중복 없음
     assert len(json.load(open(p))["trades"]) == 1
+    syms = json.load(open(tmp_path / "symbols.json"))["symbols"]          # v2.78 봇 알림용 바이낸스 종목 목록
+    assert "AUSDT" in syms and len(syms) == 252
