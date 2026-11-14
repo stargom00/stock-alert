@@ -1,0 +1,1 @@
+symbols=918 daily_rows=700088 event_dev=0.30 event_bb=0.10 events=11621 symbol_days=24335 files_5m=24326 rows_5m=7005171 calib_rows=15840 fetched=2026-11-14
