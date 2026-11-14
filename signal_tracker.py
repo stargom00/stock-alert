@@ -26,6 +26,7 @@ import pytz
 
 import coin_positions as cp
 import coin_signal_track as st
+import coin_paper_v1 as pv
 import signal_levels as lv
 from signal_levels import CONFIG, TF_MS
 
@@ -314,7 +315,7 @@ def cross_tf_confirm(signals, symbol, tf, side, bar_close_ms):
 
 def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                   fetch=lv.fetch_klines, path=None, now_ms=None, pos_path=None,
-                  track_path=None):
+                  track_path=None, paper_path=None):
     """신호 1건 처리. 저장된 레코드(발송 여부는 sig["sent"]), 같은 주기 중복이면 None.
     발송 대상이면 포지션에 반영(신규/추가/보유), 반대 방향 포지션이 열려 있으면
     opposite_of·reason="opposite"를 달고 참고 한 줄과 함께 그대로 발송(v2.47; v2.45~46은 미발송).
@@ -403,6 +404,10 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
             st.register(sig, track_path)
         except Exception as e:
             print(f"[신호추적] #{sig['id']:04d} 등록 실패: {e}")
+        try:                                  # v2.69 설계 v1 종이 매매(주문 없음, 알림 없음)
+            pv.on_signal(sig, paper_path)
+        except Exception as e:
+            print(f"[종이v1] #{sig['id']:04d} 판정 실패: {e}")
         send(format_signal_message(sig))
     else:
         why = [x for x in (sup and f"억제: {sup}", dup_of and f"중복: #{dup_of:04d}",
@@ -655,7 +660,7 @@ def signal_counts(signals, now_ms, days):
             "opposite": sum(1 for s in w if s.get("opposite_of"))}
 
 
-def format_summary(signals, positions, now_ms, windows=(7, 30), tracks=()):
+def format_summary(signals, positions, now_ms, windows=(7, 30), tracks=(), paper=None):
     """v2.44 요약: v2.44 포지션(고정 TP) 기준 + 미동 억제 + v2.44 이전 기록 분리."""
     nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
     lines = [f"📊 코인 요약 ({nz.strftime('%m/%d %H:%M')} NZ)"]
@@ -672,13 +677,15 @@ def format_summary(signals, positions, now_ms, windows=(7, 30), tracks=()):
                                            and s["bar_close_ms"] >= now_ms - days * 86_400_000))
         if legacy:
             lines.append(legacy)
+    if paper is not None:                     # v2.69 설계 v1 종이 매매 한 줄
+        lines += ["", pv.summary_line(paper, now_ms)]
     return "\n".join(lines)
 
 
-def daily_summary(send, path=None, pos_path=None, now_ms=None, track_path=None):
+def daily_summary(send, path=None, pos_path=None, now_ms=None, track_path=None, paper_path=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     send(format_summary(load_signals(path), cp.load_positions(pos_path), now_ms,
-                        tracks=st.load_tracks(track_path)))
+                        tracks=st.load_tracks(track_path), paper=pv.load(paper_path)["trades"]))
 
 
 # ── 등록 ──────────────────────────────────────────────────────────────
@@ -705,6 +712,7 @@ def register(sched, send_telegram):
     sched.every(1).minutes.do(_safe(lambda: track_open_signals(send), "신호기록"))
     sched.every(1).minutes.do(_safe(lambda: cp.track_positions(send, lv.fetch_klines), "포지션추적"))
     sched.every(1).minutes.do(_safe(lambda: st.track_open(lv.fetch_klines), "신호별추적"))
+    sched.every(1).minutes.do(_safe(lambda: pv.track_open(lv.fetch_klines), "종이v1"))
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
         _safe(lambda: daily_summary(send), "요약"))
     try:

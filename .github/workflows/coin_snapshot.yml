@@ -71,7 +71,7 @@ jobs:
               return {"status": status, "body": body}
 
           out = {"fetched_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions"):
+          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions", "coin-paper"):
               out[name] = get(f"{base}/api/{name}", hdr)
               time.sleep(0.5)
           binance = "https://data-api.binance.vision/api/v3"
@@ -88,7 +88,7 @@ jobs:
               json.dump(out, f, ensure_ascii=False, indent=1)
 
           # 요약 한 줄 (Actions 로그용)
-          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions", "btc_price"):
+          for name in ("coin-signals", "coin-track", "coin-journal", "coin-positions", "coin-paper", "btc_price"):
               r = out[name]
               n = r.get("body", {}).get("count") if isinstance(r.get("body"), dict) else None
               print(f"{name}: status={r.get('status')} count={n} err={r.get('error')}")

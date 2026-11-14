@@ -25,11 +25,13 @@ import requests
 
 import coin_positions as cp
 import coin_signal_track as st
+import coin_paper_v1 as pv
 import signal_tracker as tr
 from signal_levels import CONFIG
 
 MAX_BODY = 64 * 1024
-READ_PATHS = ("/api/coin-signals", "/api/coin-positions", "/api/coin-track", "/api/coin-journal")
+READ_PATHS = ("/api/coin-signals", "/api/coin-positions", "/api/coin-track", "/api/coin-journal",
+              "/api/coin-paper")
 
 
 def _scanner_get(url, **kw):                    # 테스트에서 이 이름만 바꿔치기(requests.get 자체는 손대지 않음)
@@ -108,6 +110,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/coin-track":
                 tracks = st.load_tracks()
                 return self._send(200, {"count": len(tracks), "tracks": tracks})
+            if url.path == "/api/coin-paper":      # v2.69 설계 v1 종이 매매(읽기 전용)
+                d = pv.load()
+                return self._send(200, {"count": len(d["trades"]), **d})
             if url.path == "/api/coin-journal":
                 code, body = fetch_scanner_journal()
                 return self._send(code, body)

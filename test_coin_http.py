@@ -116,3 +116,13 @@ def test_get_coin_journal_proxy(base, monkeypatch):
         raise requests.ConnectionError("x")
     monkeypatch.setattr(coin_http, "_scanner_get", boom)
     assert requests.get(base + "/api/coin-journal", timeout=5).status_code == 502
+
+
+def test_get_coin_paper_readonly(base):
+    """v2.69 설계 v1 종이 매매 조회 — 규칙과 거래·건너뜀 목록이 같이 나간다."""
+    r = requests.get(base + "/api/coin-paper", timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 0 and body["trades"] == [] and body["skips"] == []
+    assert body["rule"]["version"] == "v1" and body["rule"]["hold_hours"] == 24
+    assert requests.post(base + "/api/coin-paper", timeout=5).status_code == 404
