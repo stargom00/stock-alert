@@ -34,6 +34,12 @@ def test_find_events_uses_running_five_day_mean_and_skips_gaps():
     assert ah.find_events({"AAAUSDT": pump}, 0.45) == []
     gap = flat[:5] + [(8 * D, 1.0, 1.6, 1.0, 1.2, 0.0)]                # 중간에 날짜가 빠짐 → 평균이 안 맞으니 건너뜀
     assert ah.find_events({"AAAUSDT": gap}, 0.30) == []
+    # 볼린저 기준: 5일선 이격은 작아도(이미 오른 상태) 상단을 10% 넘으면 급등일
+    up = [(i * D, 1.0, 1.0, 1.0, 1.0 + 0.02 * i, 0.0) for i in range(25)]      # 천천히 오르는 중
+    up.append((25 * D, 1.5, 1.80, 1.5, 1.7, 0.0))
+    assert ah.find_events({"B": up}, 0.90) == []                              # 5일선 문턱만으로는 안 잡힘
+    assert [t for _, t, _ in ah.find_events({"B": up}, 0.90, 0.10)] == [25 * D]
+    assert ah.find_events({"B": up}, 0.90, 0.60) == []
     assert ah.event_symbol_days([("A", 6 * D, 0.4)], 3) == {("A", 6 * D), ("A", 7 * D), ("A", 8 * D)}
 
 
@@ -101,4 +107,4 @@ def test_main_end_to_end_with_fake_source(tmp_path, monkeypatch):
     ev = list(csv.reader(gzip.open(tmp_path / f"ev5m_{y}.csv.gz", "rt")))
     assert ev[0] == ["sym", "t", "o", "h", "l", "c", "q"] and ev[1][0] == "S000USDT" and len(ev) - 1 >= 288
     meta = (tmp_path / "meta.txt").read_text()
-    assert "events=1 " in meta and "event_dev=0.30" in meta
+    assert "events=1 " in meta and "event_dev=0.30" in meta and "event_bb=0.10" in meta

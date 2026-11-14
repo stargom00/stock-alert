@@ -20,8 +20,9 @@ S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 BASE = "https://data.binance.vision"
 PFX = "data/futures/um"
 EVENT_DEV = 0.30
+EVENT_BB = 0.10          # 볼린저 상단 대비 +10% (채널 Monitoring 관측값 +5~15%, Good short zone +13~26%)
 EVENT_DAYS = 3
-MAX_SYMBOL_DAYS = 15000
+MAX_SYMBOL_DAYS = 30000
 CALIB_SYMBOL = "SHELLUSDT"
 CALIB_DAYS = 12
 D = 86_400_000
@@ -78,8 +79,11 @@ def rows_of(blob):
         return
 
 
-def find_events(daily, dev=EVENT_DEV):
-    """daily: {sym: [(t,o,h,l,c,q) ...] 시간순, 숫자}. 반환 [(sym, day_ms, 장중 최대 이격)]."""
+def find_events(daily, dev=EVENT_DEV, bb=None):
+    """daily: {sym: [(t,o,h,l,c,q) ...] 시간순, 숫자}. 반환 [(sym, day_ms, 장중 최대 5일선 이격)].
+    급등일 = 장중 고가 기준 5일선 이격 ≥ dev **또는**(bb가 주어지면) 볼린저 상단(20일·2σ, 고가 포함) 대비 ≥ bb.
+    v2.74: 채널의 Good short zone이 5일선이 아니라 볼린저 상단 대비 %로 갈리는 것으로 보여(2026-11-14 알림 22개
+    대조 — 5MA +30%에서도 뜨고 +68%에서도 안 뜸) 볼린저 기준을 추가했다."""
     ev = []
     for sym, rows in daily.items():
         for i in range(4, len(rows)):
@@ -90,7 +94,13 @@ def find_events(daily, dev=EVENT_DEV):
             if s4 <= 0:
                 continue
             d = hi / ((s4 + hi) / 5) - 1
-            if d >= dev:
+            hit = d >= dev
+            if not hit and bb is not None and i >= 19 and rows[i][0] - rows[i - 19][0] == 19 * D:
+                w = [r[4] for r in rows[i - 19:i]] + [hi]
+                m = sum(w) / 20
+                sd = (sum((x - m) ** 2 for x in w) / 20) ** 0.5
+                hit = hi / (m + 2 * sd) - 1 >= bb
+            if hit:
                 ev.append((sym, rows[i][0], d))
     return ev
 
@@ -154,15 +164,15 @@ def main(out_dir="out", min_daily=100_000):
         raise SystemExit("일봉이 너무 적다 — 중단")
 
     num = {s: [(t,) + tuple(float(x) for x in r[1:]) for t, r in sorted(d.items())] for s, d in daily.items()}
-    dev = EVENT_DEV
+    dev, bb = EVENT_DEV, EVENT_BB
     while True:
-        ev = find_events(num, dev)
+        ev = find_events(num, dev, bb)
         sd = event_symbol_days(ev)
         if len(sd) <= MAX_SYMBOL_DAYS:
             break
-        dev += 0.05
+        dev += 0.05; bb += 0.02
     sd = sorted(x for x in sd if x[1] < datetime(today.year, today.month, today.day, tzinfo=timezone.utc).timestamp() * 1000)
-    print(f"급등일 {len(ev)}건(문턱 +{dev:.0%}) → 5분봉 받을 종목·날짜 {len(sd)}개", flush=True)
+    print(f"급등일 {len(ev)}건(5일선 +{dev:.0%} 또는 볼린저 +{bb:.0%}) → 5분봉 받을 종목·날짜 {len(sd)}개", flush=True)
 
     def fetch5(x):
         s, t = x
@@ -191,7 +201,7 @@ def main(out_dir="out", min_daily=100_000):
     with gzip.open(f"{out_dir}/calib_1m.csv.gz", "wt", encoding="utf-8", newline="") as f:
         w = csv.writer(f); w.writerow(["t", "o", "h", "l", "c", "q"]); w.writerows(calib)
 
-    meta = (f"symbols={len(daily)} daily_rows={n_daily} event_dev={dev:.2f} events={len(ev)} "
+    meta = (f"symbols={len(daily)} daily_rows={n_daily} event_dev={dev:.2f} event_bb={bb:.2f} events={len(ev)} "
             f"symbol_days={len(sd)} files_5m={got} rows_5m={n5} calib_rows={len(calib)} fetched={today.isoformat()}")
     open(f"{out_dir}/meta.txt", "w").write(meta + "\n")
     print(meta, flush=True)
