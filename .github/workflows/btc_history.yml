@@ -1,4 +1,4 @@
-# BTCUSDT 과거 5분봉 → btc-history 브랜치 (v2.70, 2026-11-14)
+# BTCUSDT 과거 5분봉(+ v2.80 1분봉 종가) → btc-history 브랜치 (v2.70, 2026-11-14)
 #
 # 왜: 설계 v1(프로젝트 문서 코인-설계-v1)은 4주·하락 한 국면 자료로만 만들어졌다. 상승·횡보·하락장을
 # 다 포함한 과거 자료로 다시 재려면 몇 년치 봉이 필요한데, Claude 분석 세션은 binance 도메인이
@@ -28,7 +28,7 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Download and merge
         run: |
@@ -61,50 +61,52 @@ jobs:
                           t //= 1000
                       yield t, r[1], r[2], r[3], r[4], r[5]
 
-          out, missing = {}, []
-          y, m = START
-          while (y, m) < (today.year, today.month):
-              tag = f"{y}-{m:02d}"
-              blob = get(f"{BASE}/monthly/klines/BTCUSDT/5m/BTCUSDT-5m-{tag}.zip")
-              if isinstance(blob, bytes):
-                  n = 0
-                  for row in rows_of(blob):
-                      out[row[0]] = row; n += 1
-                  print(f"{tag}: {n}")
-              else:
-                  missing.append(tag); print(f"{tag}: 없음 ({blob})")
-              y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-          # 월별 파일이 아직 없는 구간(이번 달 + 직전 달이 미발행일 때)은 일별 파일로 메운다
-          d = date(today.year, today.month, 1)
-          for tag in reversed(missing):                  # 끝에서부터 이어진 미발행 달만
-              yy, mm = (int(x) for x in tag.split("-"))
-              nxt = date(yy + 1, 1, 1) if mm == 12 else date(yy, mm + 1, 1)
-              if nxt != d:
-                  break
-              d = date(yy, mm, 1)
-          got = 0
-          while d < today:
-              blob = get(f"{BASE}/daily/klines/BTCUSDT/5m/BTCUSDT-5m-{d.isoformat()}.zip")
-              if isinstance(blob, bytes):
-                  for row in rows_of(blob):
-                      out[row[0]] = row
-                  got += 1
-              d += timedelta(days=1)
-          print(f"일별 파일 {got}개")
+          # v2.80: 1분봉은 종가만(t, c) — 1분봉 20선 확인 조건을 과거 자료로 재려고(사용자 지시 2026-11-14).
+          for IV, STEP, FULL in (("5m", 300_000, True), ("1m", 60_000, False)):
+              out, missing = {}, []
+              y, m = START
+              while (y, m) < (today.year, today.month):
+                  tag = f"{y}-{m:02d}"
+                  blob = get(f"{BASE}/monthly/klines/BTCUSDT/{IV}/BTCUSDT-{IV}-{tag}.zip")
+                  if isinstance(blob, bytes):
+                      n = 0
+                      for row in rows_of(blob):
+                          out[row[0]] = row; n += 1
+                      print(f"{tag}: {n}")
+                  else:
+                      missing.append(tag); print(f"{tag}: 없음 ({blob})")
+                  y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+              # 월별 파일이 아직 없는 구간(이번 달 + 직전 달이 미발행일 때)은 일별 파일로 메운다
+              d = date(today.year, today.month, 1)
+              for tag in reversed(missing):                  # 끝에서부터 이어진 미발행 달만
+                  yy, mm = (int(x) for x in tag.split("-"))
+                  nxt = date(yy + 1, 1, 1) if mm == 12 else date(yy, mm + 1, 1)
+                  if nxt != d:
+                      break
+                  d = date(yy, mm, 1)
+              got = 0
+              while d < today:
+                  blob = get(f"{BASE}/daily/klines/BTCUSDT/{IV}/BTCUSDT-{IV}-{d.isoformat()}.zip")
+                  if isinstance(blob, bytes):
+                      for row in rows_of(blob):
+                          out[row[0]] = row
+                      got += 1
+                  d += timedelta(days=1)
+              print(f"일별 파일 {got}개")
 
-          keys = sorted(out)
-          if len(keys) < 100_000:
-              raise SystemExit(f"봉이 너무 적다({len(keys)}) — 원천 문제. 커밋하지 않는다.")
-          gaps = sum(1 for a, b in zip(keys, keys[1:]) if b - a != 300_000)
-          with gzip.open("out/data/btc_5m.csv.gz", "wt", encoding="utf-8", newline="") as f:
-              w = csv.writer(f)
-              w.writerow(["t", "o", "h", "l", "c", "v"])
-              for k in keys:
-                  w.writerow(out[k])
-          meta = (f"bars={len(keys)} first_ms={keys[0]} last_ms={keys[-1]} gaps={gaps} "
-                  f"missing_months={','.join(missing) or '-'} fetched={today.isoformat()}")
-          open("out/data/btc_5m.meta.txt", "w").write(meta + "\n")
-          print(meta)
+              keys = sorted(out)
+              if len(keys) < 100_000:
+                  raise SystemExit(f"{IV} 봉이 너무 적다({len(keys)}) — 원천 문제. 커밋하지 않는다.")
+              gaps = sum(1 for a, b in zip(keys, keys[1:]) if b - a != STEP)
+              with gzip.open(f"out/data/btc_{IV}.csv.gz", "wt", encoding="utf-8", newline="") as f:
+                  w = csv.writer(f)
+                  w.writerow(["t", "o", "h", "l", "c", "v"] if FULL else ["t", "c"])
+                  for k in keys:
+                      w.writerow(out[k] if FULL else (out[k][0], out[k][4]))
+              meta = (f"bars={len(keys)} first_ms={keys[0]} last_ms={keys[-1]} gaps={gaps} "
+                      f"missing_months={','.join(missing) or '-'} fetched={today.isoformat()}")
+              open(f"out/data/btc_{IV}.meta.txt", "w").write(meta + "\n")
+              print(meta)
           PY
           ls -la out/data
 

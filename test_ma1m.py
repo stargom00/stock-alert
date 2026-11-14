@@ -1,4 +1,4 @@
-"""v2.79 1분봉 20선 확인 — 숏은 종가가 20선 아래, 롱은 위여야 통과. 아니면 알림 둘째 줄에 경고."""
+"""v2.79 1분봉 20선 확인 — 숏은 종가가 20선 아래, 롱은 위여야 ok. v2.80부터 기록만 하고 알림에는 안 쓴다."""
 import signal_levels as lv
 import signal_tracker as tr
 
@@ -25,9 +25,9 @@ def test_context_records_ma1m():
     assert ctx["ma1m"]["ok"] is True
 
 
-def test_warning_only_when_not_confirmed():
-    base = {"side": "short", "tf": "5m", "entry": 100.0, "tp": 99.5}
-    assert "⚠️ 1분 20선 위" in tr.warn_items({**base, "ma1m": {"ma": 99, "close": 100, "ok": False}})
-    assert "⚠️ 1분 20선 아래" in tr.warn_items({**base, "side": "long", "ma1m": {"ma": 101, "close": 100, "ok": False}})
-    assert tr.warn_items({**base, "ma1m": {"ma": 101, "close": 100, "ok": True}}) == []
-    assert tr.warn_items({**base, "ma1m": None}) == []     # 옛 기록·조회 실패는 경고 없음(실패는 '일부 조회 실패'가 따로 알림)
+def test_recorded_but_never_shown_in_alert():
+    # v2.80 사용자 지시 "알림은 보내지마. 그냥 데이터에만 기억해줘"
+    base = {"side": "short", "tf": "5m", "entry": 100.0, "tp": 99.5, "tp_pct": 0.5}
+    bad = {**base, "ma1m": {"ma": 99, "close": 100, "ok": False}}
+    assert tr.warn_items(bad) == []
+    assert "20선" not in tr.format_signal_message(bad)

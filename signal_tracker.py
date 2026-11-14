@@ -175,9 +175,6 @@ def warn_items(sig):
     h = sig.get("htf_signal")
     if h and h.get("opposite"):
         out.append(f"⚠️ {h['tf']} 반대")
-    m1 = sig.get("ma1m")
-    if m1 and m1.get("ok") is False:                # v2.79 숏인데 아직 1분 20선 위(롱은 아래) = 안 꺾였다
-        out.append("⚠️ 1분 20선 아래" if long_ else "⚠️ 1분 20선 위")
     pd = sig.get("prev_day")
     if pd and pd.get("fade") is False:
         candle = {"up": "양봉", "down": "음봉"}[pd["dir"]]
