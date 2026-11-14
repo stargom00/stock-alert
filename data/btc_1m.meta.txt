@@ -1,0 +1,1 @@
+bars=3610635 first_ms=1577836800000 last_ms=1794614340000 gaps=15 missing_months=- fetched=2026-11-14
