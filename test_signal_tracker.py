@@ -79,24 +79,21 @@ def test_unclosed_bar_ignored():
 # ── 메시지 ──
 
 def test_signal_message_format():
+    """v2.72 두 줄: 방향·주기·진입 → TP / 경고만."""
     s = base_sig(entry=82050.0, side="long", tp=82460.25, tp_pct=0.5, ref_swing=82300.0,
-                 bar_open_ms=utc_ms(2026, 10, 15, 8, 0),
-                 cloud={"pos": "above", "thick_pct": 1.5, "bias": "편"},
-                 htf_rsi={"value": 38.2, "dir": "↓"},
+                 cloud={"pos": "above", "thick_pct": 1.5, "bias": "편"}, htf_rsi={"value": 38.2, "dir": "↓"},
                  position_note="포지션 #P12 추가 2회차 (평단 81,100 → 81,153)")
-    assert tr.format_signal_message(s).split("\n") == [            # v2.49 3덩어리 배치
-        "🔺 BTCUSDT <b>5m 롱</b> 82,050 · 08:05 UTC (21:05 NZ)",
-        "🎯 TP 82,460 (+0.5% · 20배 ROI +10%)",
-        "💀 청산 78,358 (−4.50%) · 참고 1m 직전 고점 82,300 (+0.30%)",
-        "",
-        "<b>판정</b>",
-        "30m 구름 위·롱 편 (두께 1.5%) · 2h RSI 38↓",
-        "포지션 #P12 추가 2회차 (평단 81,100 → 81,153)",
-        "",
-        "#0042 · 현물 기준",
-    ]
-    short = tr.format_signal_message(base_sig(tp=99.7, tp_pct=0.3)).split("\n")
-    assert "🎯 TP 99.700 (−0.3% · 20배 ROI +6%)" in short and any("참고 1m 직전 저점 없음" in x for x in short)
+    assert tr.format_signal_message(s) == "🔺 5m 롱 82,050 → TP 82,460\n✓ 경고 없음"
+    assert tr.format_signal_message(base_sig(tp=99.7, tp_pct=0.3)) == "🔻 5m 숏 100.00 → TP 99.700\n✓ 경고 없음"
+    w = base_sig(side="short", pullback_ok=False, htf_signal={"tf": "15m", "opposite": True, "at_ms": 0, "n": 3},
+                 prev_day={"dir": "down", "fade": False, "day_open_ms": 0, "streak": 2}, run_n=6,
+                 errors={"cloud": "HTTP 451"}, confirm_note="1m #0020 → 5m 확인 (포지션 #P6 유지)")
+    assert tr.format_signal_message(w) == ("🔻 5m 숏 100.00 → TP 99.000 · 1m 확인\n"
+                                           "⚠️ 신고점 · ⚠️ 15m 반대 · ⚠️ 어제 음봉 2일째 · ⚠️ 같은 방향 6번째 · ⚠️ 일부 조회 실패")
+    one = base_sig(side="long", prev_day={"dir": "up", "fade": False, "day_open_ms": 0, "streak": 1}, run_n=tr.RUN_WARN_FROM - 1)
+    assert tr.format_signal_message(one).split("\n")[1] == "⚠️ 어제 양봉"          # 1일이면 일수 없음, 4번째는 경고 아님
+    edge = base_sig(run_n=tr.RUN_WARN_FROM)
+    assert tr.format_signal_message(edge).split("\n")[1] == f"⚠️ 같은 방향 {tr.RUN_WARN_FROM}번째"   # 경계 포함
 
 
 def test_ingest_klines_451_reason_in_message(tmp_path):
@@ -110,21 +107,7 @@ def test_ingest_klines_451_reason_in_message(tmp_path):
     assert set(sig["errors"]) == {"bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal", "prev_day"}   # v2.49 · v2.67
     assert (sig["tp"], sig["suppressed"]) == (pytest.approx(80855.7 * 1.005), False)   # TP는 조회 불필요
     assert (sig["pullback_ok"], sig["ref_extreme"], sig["dist_pct"]) == (None, None, None)
-    lines = sent[0].split("\n")
-    assert lines[1:] == [                                            # v2.49 배치
-        "🎯 TP 81,260 (+0.5% · 20배 ROI +10%)",
-        "💀 청산 77,217 (−4.50%)",
-        "",
-        "<b>판정</b>",
-        "되돌림 —",
-        "같은 방향 1번째 ✓ (관찰)",                                  # v2.67 전일 일봉은 조회 실패라 빠짐
-        "30m 구름 — · 2h RSI —",
-        "⚠️ 확인봉·1m 참고·30m 구름·2h RSI·되돌림·15m 반대 신호·전일 일봉 조회 실패: "
-        "HTTP 451 (data-api.binance.vision) → HTTP 451 (api.binance.com)",
-        "포지션: 신규 1차 #P1",
-        "",
-        "#0001 · 현물 기준",
-    ]
+    assert sent[0] == "🔺 1m 롱 80,856 → TP 81,260\n⚠️ 일부 조회 실패"                  # v2.72 두 줄
     assert "없음" not in sent[0] and "계산 실패" not in sent[0]
 
 
@@ -145,7 +128,7 @@ def test_ingest_dedup_n_bars(tmp_path):
     opp = tr.ingest_signal("BTCUSDT", "5m", "long", 99.0, t0 + 300_000, "self", sent.append, _fake_fetch_levels, p)
     assert opp["id"] == 2 and opp["opposite_of"] == 1 and opp["sent"]       # v2.47 반대 방향도 발송
     assert opp["reason"] == "opposite" and len(sent) == 2
-    assert "#P1 반대 보유" in sent[-1]
+    assert "#P1 반대 보유" in opp["position_note"]                              # v2.72 알림엔 안 나감
     assert tr.ingest_signal("BTCUSDT", "5m", "short", 99.0, t0 + 12 * 300_000, "self", sent.append, _fake_fetch_levels, p)["id"] == 3
     assert len(sent) == 3
     saved = tr.load_signals(p)
@@ -312,8 +295,8 @@ def test_1m_then_5m_confirm_binds_position(tmp_path, monkeypatch):
                          fetch=lambda *a, **kw: [], path=p, pos_path=pp)
     assert b["sent"] and not b["duplicate"]
     assert (b["confirm_of"], b["position_id"], b["position_action"]) == (20, 6, "confirm")
-    assert "1m #0020 → 5m 확인 (포지션 #P6 유지)" in sent[-1].split("\n")
-    assert "포지션:" not in sent[-1] and "추가" not in sent[-1]       # 추가·보유 줄 대신 확인 줄
+    assert b["confirm_note"] == "1m #0020 → 5m 확인 (포지션 #P6 유지)"
+    assert sent[-1].split("\n")[0].endswith("· 1m 확인")                        # v2.72 첫 줄 끝에 짧게
     pos = [x for x in cp.load_positions(pp) if x["id"] == 6][0]
     # v2.44 고정 TP: 1m 때 TP 유지(5m 값으로 바꾸지 않음)
     assert (pos["tp"], pos["qty"], pos["signal_ids"]) == (100.5, 1.0, [20, 21])
@@ -356,12 +339,14 @@ def test_pullback_check_message_and_fields(tmp_path):
     warn = tr.ingest_signal("BTCUSDT", "1m", "long", 81_448.84, close - 59_999, "self", sent.append, fetch, p)
     assert (warn["pullback_ok"], warn["ref_extreme"]) == (False, 81400.0)
     assert warn["dist_pct"] == pytest.approx(0.06, abs=1e-6)
-    assert "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)" in sent[-1].split("\n")
+    assert tr.pullback_line(warn) == "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)"
+    assert "⚠️ 신저점" in sent[-1].split("\n")[1]
     ok = tr.ingest_signal("ETHUSDT", "1m", "long", 81_490.0, close - 59_999, "self", sent.append, fetch, p)
-    assert ok["pullback_ok"] and "되돌림 ✓" in sent[-1].split("\n")       # +0.11%
+    assert ok["pullback_ok"] and "신저점" not in sent[-1]                   # +0.11%
     sh = tr.ingest_signal("SOLUSDT", "1m", "short", 81_850.0, close - 59_999, "self", sent.append, fetch, p)
     assert (sh["pullback_ok"], sh["ref_extreme"]) == (False, 81900.0)
-    assert "⚠️ 신고점 구간 (2h 최고 81,900 대비 −0.06%)" in sent[-1].split("\n")
+    assert tr.pullback_line(sh) == "⚠️ 신고점 구간 (2h 최고 81,900 대비 −0.06%)"
+    assert "⚠️ 신고점" in sent[-1].split("\n")[1]
     assert len(sent) == 3                                                   # 경고여도 발송(억제 안 함)
 
 
@@ -400,8 +385,8 @@ def test_webhook_pullback_uses_spot_converted_entry(tmp_path):
     w = tr.ingest_signal("BTCUSDT", "5m", "long", 81_540.0, t0 - 300_000, "webhook", sent.append, fetch, p)
     assert (w["entry"], w["entry_spot"]) == (81_540.0, 81_450.0)
     assert w["pullback_ok"] is False and w["dist_pct"] == pytest.approx(50 / 81_400 * 100)
-    assert "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)" in sent[-1].split("\n")
-    assert sent[-1].split("\n")[0].endswith("81,540 · 08:00 UTC (21:00 NZ)")                     # 표시·포지션은 선물가 그대로
+    assert tr.pullback_line(w) == "⚠️ 신저점 구간 (2h 최저 81,400 대비 +0.06%)"
+    assert sent[-1].split("\n")[0].startswith("🔺 5m 롱 81,540 → TP")                     # 표시·포지션은 선물가 그대로
     # 자체 판정(현물 진입가)은 환산 안 함
     s_ = tr.ingest_signal("ETHUSDT", "5m", "long", 81_540.0, t0 - 300_000, "self", sent.append, fetch, p)
     assert s_["entry_spot"] is None and s_["pullback_ok"] is True
@@ -436,7 +421,7 @@ def test_opposite_signal_sent_with_note_and_counted(tmp_path):
     n0 = len(sent)
     opp = ing("long", t0 + 300_000)
     assert len(sent) == n0 + 1                                              # 발송 1
-    assert "봇 가상 #P1 반대 보유" in sent[-1]
+    assert "봇 가상 #P1 반대 보유" in opp["position_note"]                   # v2.72 알림엔 안 나감
     assert (opp["sent"], opp["reason"], opp["opposite_of"]) == (True, "opposite", 1)
     assert tr.signal_counts(tr.load_signals(p), t0 + 600_000, 7)["opposite"] == 1
     assert [t["signal_id"] for t in tr.st.load_tracks(tp)] == [1, 2]        # 발송됐으니 추적도
@@ -463,7 +448,7 @@ def test_watch_line_marks():
                                   run_n=1)) == "어제 음봉 3일째 ✓ · 같은 방향 1번째 ✓ (관찰)"     # v2.68
     assert "일째" not in tr.watch_line(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0, "streak": 1}, run_n=1))
     assert tr.watch_line(base_sig()) is None                 # 옛 신호(필드 없음)는 줄 없음
-    assert "(관찰)" in tr.format_signal_message(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0}, run_n=2))
+    assert "어제" not in tr.format_signal_message(base_sig(prev_day={"dir": "up", "fade": True, "day_open_ms": 0}, run_n=2))
 
 
 def test_ingest_records_run_n_and_prev_day(tmp_path):
@@ -479,5 +464,5 @@ def test_ingest_records_run_n_and_prev_day(tmp_path):
     a, b, c = ing(0, "short"), ing(1, "short"), ing(2, "long")
     assert (a["run_n"], b["run_n"], c["run_n"]) == (1, 2, 1)
     assert a["prev_day"]["fade"] is True and c["prev_day"]["fade"] is False
-    assert "어제 양봉 ✓ · 같은 방향 2번째 ✓ (관찰)" in sent[1]
-    assert "⚠️ 어제 양봉 뒤 롱" in sent[2]
+    assert sent[1].endswith("✓ 경고 없음")                                          # 양봉 뒤 숏 = 경고 없음
+    assert sent[2].endswith("⚠️ 어제 양봉")

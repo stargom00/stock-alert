@@ -166,59 +166,37 @@ def ref_line(sig):
     return f"참고 1m 직전 {what} {fmt_px(v)} ({fmt_pct(_pct_from(sig['entry'], v))})"
 
 
+def warn_items(sig):
+    """v2.72 알림 2줄째: 경고만 짧게. 판정 근거 숫자는 기록(sig)에 그대로 있다."""
+    long_ = sig["side"] == "long"
+    out = []
+    if sig.get("pullback_ok") is False:
+        out.append("⚠️ 신저점" if long_ else "⚠️ 신고점")
+    h = sig.get("htf_signal")
+    if h and h.get("opposite"):
+        out.append(f"⚠️ {h['tf']} 반대")
+    pd = sig.get("prev_day")
+    if pd and pd.get("fade") is False:
+        candle = {"up": "양봉", "down": "음봉"}[pd["dir"]]
+        streak = pd.get("streak") or 1
+        out.append(f"⚠️ 어제 {candle}" + (f" {streak}일째" if streak >= 2 else ""))
+    if (sig.get("run_n") or 0) >= RUN_WARN_FROM:
+        out.append(f"⚠️ 같은 방향 {sig['run_n']}번째")
+    if sig.get("errors"):
+        out.append("⚠️ 일부 조회 실패")
+    return out
+
+
 def format_signal_message(sig):
-    """v2.49(사용자 지시 2026-10-20 "한눈에 안 들어와, 정리해줘"): 3덩어리 — 머리(주기·방향·가격·시각),
-    숫자(TP·청산·참고), 판정(되돌림·15m 반대 신호·구름·RSI). 꼬리에 ID·가격 기준·가상 포지션."""
-    entry = sig["entry"]
-    side_ko = _SIDE_KO[sig["side"]]
+    """v2.72(사용자 지시 2026-11-14 "너무 복잡해서 한눈에 안들어와. 간단하게 바꿔서 보내줘"):
+    1줄 = 방향·주기·진입가 → TP (+ 짧은 주기 신호를 확인한 경우 "1m 확인"), 2줄 = 경고만, 없으면 ✓.
+    뺀 것(기록에는 그대로 남음): 시각, 청산가, 1m 참고, 구름, 2h RSI, 봇 가상 포지션 줄, ID, 가격 기준."""
     head = "🔺" if sig["side"] == "long" else "🔻"
-    errs = sig.get("errors") or {}
-    t = datetime.fromtimestamp((sig["bar_close_ms"] + 1) / 1000, timezone.utc)
-    when = f"{t.strftime('%H:%M')} UTC ({t.astimezone(NZ_TZ).strftime('%H:%M')} NZ)"
-    lines = [f"{head} {sig['symbol']} <b>{sig['tf']} {side_ko}</b> {fmt_px(entry)} · {when}",
-             "🎯 " + tp_line(sig)]
-    liq = lv.liquidation_price(sig["side"], entry)
-    liq_s = f"💀 청산 {fmt_px(liq)} ({fmt_pct(_pct_from(entry, liq))})"
-    if "ref" not in errs:
-        liq_s += " · " + ref_line(sig)
-    lines.append(liq_s)
-    lines.append("")
-    lines.append("<b>판정</b>")
-    pb_line = pullback_line(sig)
-    if pb_line:
-        lines.append(pb_line)
-    hs_line = htf_signal_line(sig)
-    if hs_line:
-        lines.append(hs_line)
-    w_line = watch_line(sig)
-    if w_line:
-        lines.append(w_line)
-    c = sig.get("cloud")
-    if c:
-        tail = "중립" if c["bias"] == "중립" else f"{side_ko} {c['bias']}"
-        cloud_s = f"{CONFIG['CLOUD_TF']} 구름 {_POS_KO[c['pos']]}·{tail} (두께 {c['thick_pct']:.1f}%)"
-    else:
-        cloud_s = f"{CONFIG['CLOUD_TF']} 구름 —"
-    h = sig.get("htf_rsi")
-    rsi_s = f"{CONFIG['HTF_RSI_TF']} RSI {h['value']:.0f}{h['dir']}" if h else f"{CONFIG['HTF_RSI_TF']} RSI —"
-    lines.append(f"{cloud_s} · {rsi_s}")
-    # 실패 사유: 같은 사유는 한 줄로 묶음 (보통 전부 같은 HTTP 오류)
-    labels = {"bar": "확인봉", "ref": "1m 참고", "cloud": f"{CONFIG['CLOUD_TF']} 구름",
-              "htf_rsi": f"{CONFIG['HTF_RSI_TF']} RSI", "pullback": "되돌림",
-              "htf_signal": f"{CONFIG['HTF_SIGNAL_TF']} 반대 신호", "prev_day": "전일 일봉"}
-    by_reason = {}
-    for k in ("bar", "ref", "cloud", "htf_rsi", "pullback", "htf_signal", "prev_day"):
-        if k in errs:
-            by_reason.setdefault(errs[k], []).append(labels[k])
-    for reason, what in by_reason.items():
-        lines.append(f"⚠️ {'·'.join(what)} 조회 실패: {reason}")
+    l1 = f"{head} {sig['tf']} {_SIDE_KO[sig['side']]} {fmt_px(sig['entry'])} → TP {fmt_px(sig['tp'])}"
     if sig.get("confirm_note"):
-        lines.append(sig["confirm_note"])
-    if sig.get("position_note"):
-        lines.append(sig["position_note"])
-    lines.append("")
-    lines.append(f"#{sig['id']:04d} · {sig.get('price_basis') or lv.price_basis()} 기준")
-    return "\n".join(lines)
+        l1 += f" · {sig['confirm_note'].split(' ', 1)[0]} 확인"
+    warns = warn_items(sig)
+    return l1 + "\n" + (" · ".join(warns) if warns else "✓ 경고 없음")
 
 
 # ── 수신·중복 제거·발송 ──────────────────────────────────────────────
@@ -702,8 +680,8 @@ def _safe(fn, name):
 
 def senders(send_telegram, env=None):
     """(send, sig_send). send = 코인 방으로 발송. sig_send = 신호·포지션·요약용 —
-    v2.71(사용자 지시 2026-11-14 "알림을 다 빼고 50일선 위/아래만 보내줘")부터 기본은 무음(로그만).
-    COIN_SIGNAL_ALERTS=1이면 예전처럼 발송."""
+    v2.71에서 기본 무음으로 바꿨다가 v2.72에서 되돌림(사용자 2026-11-14 "지금 보내는 신호도 계속 보내줘
+    나는 간단하게 정리해서 보내달라고 한거야") — 기본 발송, 짧은 모양. COIN_SIGNAL_ALERTS=0이면 무음."""
     env = os.environ if env is None else env
     chat_id = env.get("COIN_CHAT_ID") or None
 
@@ -713,7 +691,7 @@ def senders(send_telegram, env=None):
     def quiet(msg):
         print("[코인신호·무음] " + msg.split("\n", 1)[0])
 
-    on = env.get("COIN_SIGNAL_ALERTS", "0").strip().lower() in ("1", "true", "on", "yes")
+    on = env.get("COIN_SIGNAL_ALERTS", "1").strip().lower() not in ("0", "false", "off", "no")
     return send, (send if on else quiet)
 
 

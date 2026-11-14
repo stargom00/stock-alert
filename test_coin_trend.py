@@ -66,22 +66,22 @@ def test_check_too_few_bars_sends_nothing(tmp_path):
     assert sent == []
 
 
-def test_signal_alerts_off_by_default_trend_on():
+def test_signal_alerts_on_by_default_can_mute():
+    """v2.72 기본 발송(v2.71의 기본 무음은 사용자 의도와 달라 되돌림). COIN_SIGNAL_ALERTS=0이면 무음."""
     out = []
     tg = lambda msg, chat_id=None: out.append((chat_id, msg))
     send, sig_send = tr.senders(tg, {"COIN_CHAT_ID": "-100"})
-    sig_send("🔻 BTCUSDT 1m 숏\n…")
-    assert out == []                                                                    # 신호는 무음
+    sig_send("🔻 1m 숏")
     send("⚪ BTC 50일선 아래 · 쉬기")
-    assert out == [("-100", "⚪ BTC 50일선 아래 · 쉬기")]                                # 50일선은 코인 방으로
+    assert out == [("-100", "🔻 1m 숏"), ("-100", "⚪ BTC 50일선 아래 · 쉬기")]          # 둘 다 코인 방으로
     out.clear()
-    _, on = tr.senders(tg, {"COIN_SIGNAL_ALERTS": "1"})
-    on("x")
-    assert out == [(None, "x")]                                                         # 켜면 예전처럼
+    _, off = tr.senders(tg, {"COIN_SIGNAL_ALERTS": "0"})
+    off("x")
+    assert out == []
 
 
-def test_register_routes_signal_jobs_to_quiet_sender(monkeypatch):
-    """register가 신호 쪽 잡에 무음 sender를 실제로 넘기는지 — 잡을 직접 실행해 본다."""
+def test_register_routes_signal_jobs_to_sig_sender(monkeypatch):
+    """register가 신호 쪽 잡엔 sig_send, 50일선엔 send를 넘기는지 — 잡을 직접 실행해 본다(무음으로 확인)."""
     class Job:
         def __init__(self, jobs): self.jobs = jobs
         def __getattr__(self, name): return self
@@ -90,7 +90,7 @@ def test_register_routes_signal_jobs_to_quiet_sender(monkeypatch):
     jobs, out = [], []
     sched = type("S", (), {"every": lambda self, *a: Job(jobs)})()
     monkeypatch.setenv("COIN_HTTP_ENABLED", "0")
-    monkeypatch.delenv("COIN_SIGNAL_ALERTS", raising=False)
+    monkeypatch.setenv("COIN_SIGNAL_ALERTS", "0")
     seen = {}
     monkeypatch.setattr(tr, "daily_summary", lambda send: send("📊 요약"))
     monkeypatch.setattr(tr, "self_detect", lambda send: send("🔻 신호"))
