@@ -31,7 +31,7 @@ from signal_levels import CONFIG
 
 MAX_BODY = 64 * 1024
 READ_PATHS = ("/api/coin-signals", "/api/coin-positions", "/api/coin-track", "/api/coin-journal",
-              "/api/coin-paper")
+              "/api/coin-paper", "/api/net-probe")
 
 
 def _scanner_get(url, **kw):                    # 테스트에서 이 이름만 바꿔치기(requests.get 자체는 손대지 않음)
@@ -104,6 +104,9 @@ class Handler(BaseHTTPRequestHandler):
             need = os.environ.get("COIN_API_READ_TOKEN", "")
             if need and not _token_ok(need, self.headers.get("X-Api-Read-Token", "")):
                 return self._send(401, {"error": "unauthorized"})
+            if url.path == "/api/net-probe":      # v2.77 선물 시세 API 도달 진단(읽기 전용)
+                import net_probe
+                return self._send(200, net_probe.probe())
             if url.path == "/api/coin-signals":
                 sigs = tr.load_signals()
                 return self._send(200, {"count": len(sigs), "signals": sigs})

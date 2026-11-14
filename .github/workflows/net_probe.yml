@@ -1,0 +1,43 @@
+# 선물 시세 API 도달 진단 (v2.77) — Actions 러너와 Railway 봇 양쪽에서 찔러 net-probe 브랜치에 남긴다.
+# 수동 실행 또는 이 파일·net_probe.py가 바뀌어 push될 때만. push 때는 Railway 재배포를 기다린 뒤 읽는다.
+name: net probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/net_probe.yml', 'net_probe.py']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe
+        env:
+          BASE: https://stock-alert-production-275a.up.railway.app
+          TOKEN: ${{ secrets.COIN_API_READ_TOKEN }}
+        run: |
+          pip -q install requests
+          mkdir -p out/probe
+          python3 net_probe.py > out/probe/actions.json; cat out/probe/actions.json
+          for i in $(seq 1 24); do
+            code=$(curl -s -m 90 -o out/probe/railway.json -w '%{http_code}' -H "X-Api-Read-Token: $TOKEN" "$BASE/api/net-probe")
+            echo "railway try $i: $code"
+            [ "$code" = "200" ] && break
+            sleep 20
+          done
+          echo "$code" > out/probe/railway_status.txt; cat out/probe/railway.json || true
+      - name: Commit
+        run: |
+          cd out
+          git init -q -b net-probe
+          git config user.name "net-probe[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add probe
+          git commit -q -m "net probe $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" net-probe
