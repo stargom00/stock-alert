@@ -31,6 +31,12 @@ jobs:
             -H "Authorization: token ${{ github.token }}" || echo "원장 없음 — 새로 시작"
       - name: Record
         run: python3 tools/spike_paper.py out/paper/ledger.json
+      - name: Pipeline check on past days (push only)
+        if: github.event_name == 'push'
+        env:
+          SPIKE_CHECK_START: '2026-11-07'
+          SPIKE_CHECK_UNTIL: '2026-11-13'
+        run: python3 tools/spike_paper.py out/paper/check_2026-11-07.json
       - name: Commit to spike-paper
         run: |
           cd out

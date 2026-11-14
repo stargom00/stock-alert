@@ -149,14 +149,16 @@ def fetch_funding(sym, d0, d1):
     return sorted(set(out))
 
 
-def run(ledger_path, today=None):
+def run(ledger_path, today=None, start=None, until=None):
+    """start/until은 점검용(과거 구간을 별도 원장에 돌려 백테스트와 대조). 실제 기록은 RULE["start"]부터."""
     today = today or datetime.now(timezone.utc).date()
     try:
         led = json.load(open(ledger_path, encoding="utf-8"))
     except (OSError, ValueError):
         led = {"last_day": None, "trades": [], "blocked": {}, "log": []}
     led["rule"] = RULE
-    start = date.fromisoformat(RULE["start"])
+    start = start or date.fromisoformat(RULE["start"])
+    today = min(today, until) if until else today
     d = date.fromisoformat(led["last_day"]) + timedelta(days=1) if led["last_day"] else start
     prefixes, _ = s3_list(f"{PFX}/daily/klines/")
     syms = sorted(p.rstrip("/").split("/")[-1] for p in prefixes)
@@ -214,4 +216,6 @@ def run(ledger_path, today=None):
 
 
 if __name__ == "__main__":
-    run(sys.argv[1] if len(sys.argv) > 1 else "paper/ledger.json")
+    st, un = os.environ.get("SPIKE_CHECK_START"), os.environ.get("SPIKE_CHECK_UNTIL")
+    run(sys.argv[1] if len(sys.argv) > 1 else "paper/ledger.json",
+        start=date.fromisoformat(st) if st else None, until=date.fromisoformat(un) if un else None)
