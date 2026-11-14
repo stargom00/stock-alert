@@ -625,7 +625,8 @@ HELP_MESSAGE = (
     "🪙 <b>코인 조회</b>\n"
     "• <code>BTC</code> → 비트코인 현재가\n"
     "• <code>거래대금</code> → 코스피/코스닥/업비트 거래대금\n"
-    "• 지원: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, ONDO\n\n"
+    "• 지원: BTC, ETH, SOL, XRP, DOGE, ADA, LINK, ONDO\n"
+    "• <code>상황</code> → BTC 1h·2h·4h·일봉 스토캐스틱·구름·20/99선 한 화면 (v2.81)\n\n"
     "🔔 <b>자동 알림</b>\n"
     "• 목표가 도달 알림 (30초마다 확인)\n"
     "• 급등락 알림 (5분마다 확인)\n"
@@ -653,6 +654,12 @@ def handle_message(text, chat_id):
     # BotFather의 /setprivacy를 Disable로 바꿔야 한다.
     if text in ("아이디", "방아이디", "chatid", "chat id"):
         send_telegram(chat_id_notice(chat_id), chat_id)
+        return
+
+    # v2.81 BTC 상황판(스토캐스틱·구름·20/99선, 알림 없이 물으면 답함)
+    if text in ("상황", "상황판", "코인상황", "비트상황"):
+        import coin_board
+        send_telegram(coin_board.board(), chat_id)
         return
 
     # v2.60 매일 훈련 알림 명령(훈련 · 훈련시간 · 훈련끄기/켜기)
