@@ -175,6 +175,9 @@ def warn_items(sig):
     h = sig.get("htf_signal")
     if h and h.get("opposite"):
         out.append(f"⚠️ {h['tf']} 반대")
+    m1 = sig.get("ma1m")
+    if m1 and m1.get("ok") is False:                # v2.79 숏인데 아직 1분 20선 위(롱은 아래) = 안 꺾였다
+        out.append("⚠️ 1분 20선 아래" if long_ else "⚠️ 1분 20선 위")
     pd = sig.get("prev_day")
     if pd and pd.get("fade") is False:
         candle = {"up": "양봉", "down": "음봉"}[pd["dir"]]
@@ -328,6 +331,7 @@ def ingest_signal(symbol, tf, side, entry, bar_open_ms, source, send,
                       if ctx["cloud"] else None),
             "htf_rsi": ctx["htf_rsi"],
             "htf_signal": ctx.get("htf_signal"),                   # v2.49 큰 주기 반대 신호(경고만)
+            "ma1m": ctx.get("ma1m"),                               # v2.79 1분봉 20선 대비 위치(관찰)
             "prev_day": ctx.get("prev_day"),                       # v2.67 전일 일봉 방향(관찰)
             "run_n": None,                                         # v2.67 같은 방향 연속 n번째(발송 신호만)
             # v2.43 되돌림(통계용, 억제 안 함). 조회 실패면 셋 다 None

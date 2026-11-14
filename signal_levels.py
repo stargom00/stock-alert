@@ -401,6 +401,19 @@ def prev_day_check(day_bars, side, bar_close_ms):
     return {"dir": d, "fade": fade, "day_open_ms": b["t"], "streak": streak}
 
 
+MA1M_BARS = 20   # v2.79 사용자 지시 2026-11-14 "1봉기준 20선 하향돌파도 조건에 넣어"(투결혼 채널의 숏 진입 확인 방식)
+
+
+def ma1m_check(b1, side):
+    """마감된 1m 봉으로 20선 대비 위치. 숏은 종가가 20선 아래, 롱은 위여야 ok.
+    반환 {"ma","close","ok"} 또는 None(봉 부족). b1은 신호 봉 마감 시각까지의 1m 봉."""
+    cl = [b["c"] for b in sorted(b1, key=lambda b: b["t"])][-MA1M_BARS:]
+    if len(cl) < MA1M_BARS:
+        return None
+    ma = sum(cl) / MA1M_BARS
+    return {"ma": ma, "close": cl[-1], "ok": cl[-1] < ma if side == "short" else cl[-1] > ma}
+
+
 def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klines, spot_entry=False):
     """신호 하나에 필요한 레벨·맥락 전부. 네트워크 실패한 부분은 None으로 두고
     나머지는 계속 계산(알림 자체는 나가게).
@@ -414,6 +427,7 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
     out = {"tp": tp_price(side, entry, pct), "tp_pct": pct,
            "confirm_range_pct": None, "ref_swing": None,
            "cloud": None, "htf_rsi": None, "pullback": None, "entry_spot": None,
+           "ma1m": None,         # v2.79 {"ma","close","ok"} 1분봉 20선 대비 위치(관찰)
            "prev_day": None,     # v2.67 {"dir","fade","day_open_ms"} 전일 일봉 방향(관찰)
            "htf_signal": None,   # v2.49 {"tf","opposite","at_ms","n"} — 신호 주기가 HTF 이상이면 None(해당 없음)
            "errors": {}}   # {"bar"|"ref"|"cloud"|"htf_rsi"|"pullback"|"htf_signal": 사유}
@@ -434,6 +448,7 @@ def build_signal_context(symbol, tf, side, entry, bar_close_ms, fetch=fetch_klin
             b1 = [b for b in fetch(symbol, "1m", limit=CONFIG["LEVEL_LOOKBACK"], end_ms=bar_close_ms)
                   if b["T"] <= bar_close_ms]
         out["ref_swing"] = ref_swing(b1, side, entry)
+        out["ma1m"] = ma1m_check(b1, side)
     except Exception as e:
         out["errors"]["ref"] = _err_text(e)
     try:
