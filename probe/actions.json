@@ -1,0 +1,42 @@
+{
+ "binance_fapi": {
+  "status": 451,
+  "bytes": 224
+ },
+ "okx": {
+  "status": 200,
+  "bytes": 161651
+ },
+ "bitget": {
+  "status": 200,
+  "bytes": 447316
+ },
+ "mexc": {
+  "status": 200,
+  "bytes": 614901
+ },
+ "gate": {
+  "status": 200,
+  "bytes": 494801
+ },
+ "bybit": {
+  "status": 403,
+  "bytes": 96
+ },
+ "kucoin": {
+  "status": 200,
+  "bytes": 163467
+ },
+ "binance_s3_list": {
+  "status": 200,
+  "bytes": 88815
+ },
+ "bitget_5m": {
+  "status": 200,
+  "bytes": 1303
+ },
+ "bitget_1d": {
+  "status": 200,
+  "bytes": 2251
+ }
+}
