@@ -24,7 +24,7 @@ def sig(age_d=1):
 # 11-15 아침 요약의 7일 숫자: 추가 있음 8개 중 4 익절(평균 −0.70) · 없음 9개 다 익절(+0.46) · 보유 1
 POS = ([pos("hit_tp", 0.5, adds=1)] * 4 + [pos("giveup", -1.9, adds=2)] * 4 + [pos("hit_tp", 0.46)] * 9
        + [pos(None, None, status="open")] + [pos("hit_tp", 0.5, age_d=20)] * 30)
-TRACKS = [track(True)] * 53 + [track(False)] * 142
+TRACKS = ([track(True)] * 30 + [track(True, pb=False)] * 23 + [track(False)] * 72 + [track(False, pb=False)] * 70)   # 실제처럼 ✓·⚠️ 섞음
 
 
 def test_brief_lines_and_colors():
