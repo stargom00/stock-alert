@@ -700,21 +700,37 @@ def _safe(fn, name):
     return run
 
 
-def register(sched, send_telegram):
-    """main.py가 호출. 스케줄 등록 + HTTP 서버(Webhook·조회 API) 기동."""
-    chat_id = os.environ.get("COIN_CHAT_ID") or None
+def senders(send_telegram, env=None):
+    """(send, sig_send). send = 코인 방으로 발송. sig_send = 신호·포지션·요약용 —
+    v2.71(사용자 지시 2026-11-14 "알림을 다 빼고 50일선 위/아래만 보내줘")부터 기본은 무음(로그만).
+    COIN_SIGNAL_ALERTS=1이면 예전처럼 발송."""
+    env = os.environ if env is None else env
+    chat_id = env.get("COIN_CHAT_ID") or None
 
     def send(msg):
         send_telegram(msg, chat_id=chat_id)
 
-    sched.every(15).seconds.do(_safe(lambda: self_detect(send), "자체판정"))
-    sched.every(5).seconds.do(_safe(lambda: drain_webhook_queue(send), "webhook"))
-    sched.every(1).minutes.do(_safe(lambda: track_open_signals(send), "신호기록"))
-    sched.every(1).minutes.do(_safe(lambda: cp.track_positions(send, lv.fetch_klines), "포지션추적"))
+    def quiet(msg):
+        print("[코인신호·무음] " + msg.split("\n", 1)[0])
+
+    on = env.get("COIN_SIGNAL_ALERTS", "0").strip().lower() in ("1", "true", "on", "yes")
+    return send, (send if on else quiet)
+
+
+def register(sched, send_telegram):
+    """main.py가 호출. 스케줄 등록 + HTTP 서버(Webhook·조회 API) 기동."""
+    send, sig_send = senders(send_telegram)
+    import coin_trend
+    # 신호 판정·기록·추적은 그대로 돈다(자료는 계속 쌓임). 텔레그램으로 나가는지만 sig_send가 정한다.
+    sched.every(15).seconds.do(_safe(lambda: self_detect(sig_send), "자체판정"))
+    sched.every(5).seconds.do(_safe(lambda: drain_webhook_queue(sig_send), "webhook"))
+    sched.every(1).minutes.do(_safe(lambda: track_open_signals(sig_send), "신호기록"))
+    sched.every(1).minutes.do(_safe(lambda: cp.track_positions(sig_send, lv.fetch_klines), "포지션추적"))
     sched.every(1).minutes.do(_safe(lambda: st.track_open(lv.fetch_klines), "신호별추적"))
     sched.every(1).minutes.do(_safe(lambda: pv.track_open(lv.fetch_klines), "종이v1"))
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
-        _safe(lambda: daily_summary(send), "요약"))
+        _safe(lambda: daily_summary(sig_send), "요약"))
+    sched.every(5).minutes.do(_safe(lambda: coin_trend.check(send), "50일선"))   # v2.71 이것만 기본으로 발송
     try:
         import coin_http
         coin_http.start_server()
