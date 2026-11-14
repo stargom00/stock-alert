@@ -1,0 +1,35 @@
+# 채널 알림 전후 1분봉 → alert-1m 브랜치 (v2.75, 2026-11-14). 내용·이유는 tools/alert_1m.py 머리말.
+# main에는 아무것도 커밋하지 않는다. 목록이나 이 파일이 바뀌어 push될 때와 수동 실행에만 돈다.
+name: alert 1m
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/alert_1m.yml', 'tools/alert_1m.py', 'tools/alert_days.csv']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alert-1m
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download
+        run: python3 tools/alert_1m.py out/a1m
+      - name: Commit to alert-1m
+        run: |
+          ls -la out/a1m
+          cd out
+          git init -q -b alert-1m
+          git config user.name "alert-1m[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add a1m
+          git commit -q -m "alert 1m $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" alert-1m
