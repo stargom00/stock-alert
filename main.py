@@ -2640,21 +2640,55 @@ def check_recheck_events():
 def format_added_message(payload):
     """v2.53 — 스캐너 v5.377 자동 일정(빗각×기준선 수렴, /api/user-events/added) → 텔레그램 본문.
     사용자 지시 2026-11-07 "빗각이랑 사이가 좁아질때(변곡점 가까이 올때) 홈화면 달력에 추가해주고 알림봇으로 알림도 보내줘. 추가되면".
-    만나는 날(일정 날짜)엔 기존 재확인 알림(format_recheck_message)이 한 번 더 보낸다. 새 일정이 없으면 None."""
+    v2.83(사용자 지시 2026-11-15 "알림봇에 이게 눈에 하나도 안들어옴. 눈에 읽히기 쉽게바꿔줘"): 만나는 날짜별로 묶고, 종목마다 한 줄 —
+    종가 · 빗각까지 %(돌파 거리) · 기준선까지 %(무효 거리). 빗각에 가까운 순. 스캐너 v5.383 구조 필드 conv를 쓰고, conv 없는 옛 일정은
+    제목+메모 그대로. 만나는 날(일정 날짜)엔 기존 재확인 알림(format_recheck_message)이 한 번 더 보낸다. 새 일정이 없으면 None."""
     events = (payload or {}).get("events") or []
     if not events:
         return None
-    lines = [f"📐 <b>빗각×기준선 수렴 — 달력에 추가</b> ({len(events)}종목)", ""]
-    for e in events:
+    WDAY = "월화수목금토일"
+
+    def link(e):
         tk = str(e.get("ticker") or "").upper()
         code = tk[:-3] if tk.endswith((".KS", ".KQ")) else tk
         sym = f"KRX:{code}" if code.isdigit() and len(code) == 6 else code.replace(".", "")
-        url = f"https://www.tradingview.com/chart/?symbol={sym}"
-        title = html.escape(str(e.get("title") or ""))
-        lines.append(f"· <b>{html.escape(str(e.get('date') or ''))}</b> <a href=\"{url}\">{html.escape(tk)}</a> {title}")
-        memo = str(e.get("memo") or "").strip()
-        if memo:
-            lines.append(f"   ↳ {html.escape(memo)}")
+        return f"https://www.tradingview.com/chart/?symbol={sym}", tk, code
+
+    def pct(a, b):
+        return f"{(a / b - 1) * 100:+.1f}%"
+
+    def row(e):
+        url, tk, code = link(e)
+        cv = e.get("conv") or {}
+        if not all(isinstance(cv.get(k), (int, float)) and cv.get(k) for k in ("line", "base", "close")):
+            title = html.escape(str(e.get("title") or tk))
+            memo = str(e.get("memo") or "").strip()
+            return 9e9, f"• <a href=\"{url}\">{title}</a>" + (f"\n   {html.escape(memo)}" if memo else "")
+        us = cv.get("mkt") == "US"
+        f = (lambda x: f"{x:,.2f}") if us else (lambda x: f"{x:,.0f}")
+        name = str(cv.get("name") or code)
+        name = (code if us else name.split(" - ")[0])[:14]
+        flag = "🇺🇸" if us else "🇰🇷"
+        c, ln, bs = cv["close"], cv["line"], cv["base"]
+        to_line, to_base = ln / c - 1, bs / c - 1
+        line = (f"{flag} <a href=\"{url}\"><b>{html.escape(name)}</b></a> {f(c)}\n"
+                f"   ↗ 빗각 {f(ln)} ({pct(ln, c)})  ↘ 기준선 {f(bs)} ({pct(bs, c)})")
+        return abs(to_line), line
+
+    by_date = {}
+    for e in events:
+        by_date.setdefault(str(e.get("date") or ""), []).append(e)
+    lines = [f"📐 <b>빗각×기준선 수렴</b> · 새로 {len(events)}종목 달력에 추가",
+             "<i>그 주 종가가 빗각 위 = 돌파 · 기준선 아래 = 저점 무효 (자동 빗각, 검증 전)</i>"]
+    for d in sorted(by_date):
+        try:
+            dt_ = datetime.strptime(d, "%Y-%m-%d")
+            head = f"{dt_.month}/{dt_.day}({WDAY[dt_.weekday()]})"
+        except ValueError:
+            head = d
+        rows = sorted((row(e) for e in by_date[d]), key=lambda x: x[0])
+        lines += ["", f"🗓 <b>{html.escape(head)} 만남</b> · {len(rows)}종목"] + [r for _, r in rows]
+    lines += ["", "<i>%는 지금 종가에서 그 선까지 거리 · 빗각에 가까운 순</i>"]
     return "\n".join(lines)
 
 

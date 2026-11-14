@@ -17,7 +17,8 @@ def _load(names):
     tree = ast.parse(SRC)
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(nodes) == len(names)
-    ns = {"html": html}
+    from datetime import datetime
+    ns = {"html": html, "datetime": datetime}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), MAIN_PY, "exec"), ns)
     return ns
 
@@ -80,11 +81,26 @@ def test_scheduled_daily():
 def test_added_message_format_and_empty():
     f = _load({"format_added_message"})["format_added_message"]
     assert f({"events": []}) is None
+    # 옛 일정(conv 없음) — 제목·메모 그대로, 이스케이프
     msg = f({"events": [{"date": "2026-11-20", "ticker": "036890.KQ", "title": "📐 빗각×기준선 수렴 · 진성티이씨",
                          "memo": "빗각 9,000 <x>"}]})
-    assert msg.startswith("📐 <b>빗각×기준선 수렴 — 달력에 추가</b> (1종목)")
-    assert 'symbol=KRX:036890">036890.KQ</a>' in msg and "<b>2026-11-20</b>" in msg
-    assert "↳ 빗각 9,000 &lt;x&gt;" in msg
+    assert msg.startswith("📐 <b>빗각×기준선 수렴</b> · 새로 1종목 달력에 추가")
+    assert 'symbol=KRX:036890">📐 빗각×기준선 수렴 · 진성티이씨</a>' in msg and "빗각 9,000 &lt;x&gt;" in msg
+    assert "🗓 <b>11/20(금) 만남</b> · 1종목" in msg
+
+
+def test_added_message_v282_table_grouped_sorted():
+    """v2.83 — 날짜별 묶음 · 종목마다 종가 + 빗각/기준선까지 % · 빗각에 가까운 순 · US는 티커·소수 2자리."""
+    f = _load({"format_added_message"})["format_added_message"]
+    ev = [{"date": "2026-11-27", "ticker": "079960.KQ", "conv": {"mkt": "KR", "name": "동양이엔피", "line": 15280, "base": 13920, "close": 14730}},
+          {"date": "2026-11-20", "ticker": "AKTX", "conv": {"mkt": "US", "name": "Akari Therapeutics Plc - ADS", "line": 7.24, "base": 6.51, "close": 6.80}},
+          {"date": "2026-11-20", "ticker": "065150.KQ", "conv": {"mkt": "KR", "name": "대산F&B", "line": 1152, "base": 1060, "close": 1144}}]
+    msg = f({"events": ev})
+    assert msg.index("11/20(금)") < msg.index("11/27(금)")                       # 날짜순
+    assert msg.index("대산F&amp;B") < msg.index("AKTX")                          # 같은 날 안에서 빗각 가까운 순(+0.7% < +6.5%)
+    assert "<b>대산F&amp;B</b></a> 1,144\n   ↗ 빗각 1,152 (+0.7%)  ↘ 기준선 1,060 (-7.3%)" in msg
+    assert "🇺🇸" in msg and "<b>AKTX</b></a> 6.80" in msg and "빗각 7.24 (+6.5%)" in msg and "Akari" not in msg
+    assert "주당" not in msg                                                      # 기울기·고점 날짜는 알림에서 뺐다(달력 메모엔 그대로)
 
 
 def test_added_scheduled_daily():
