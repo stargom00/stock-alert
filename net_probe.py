@@ -10,6 +10,9 @@ URLS = {
     "gate": "https://api.gateio.ws/api/v4/futures/usdt/tickers",
     "bybit": "https://api.bybit.com/v5/market/tickers?category=linear",
     "kucoin": "https://api-futures.kucoin.com/api/v1/allTickers",
+    "binance_s3_list": "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&prefix=data/futures/um/daily/klines/",
+    "bitget_5m": "https://api.bitget.com/api/v2/mix/market/candles?symbol=BTCUSDT&productType=USDT-FUTURES&granularity=5m&limit=15",
+    "bitget_1d": "https://api.bitget.com/api/v2/mix/market/candles?symbol=BTCUSDT&productType=USDT-FUTURES&granularity=1Dutc&limit=25",
 }
 
 

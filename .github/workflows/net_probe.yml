@@ -25,6 +25,16 @@ jobs:
           pip -q install requests
           mkdir -p out/probe
           python3 net_probe.py > out/probe/actions.json; cat out/probe/actions.json
+          python3 - <<'PY'
+          import json, requests
+          B = "https://api.bitget.com/api/v2/mix/market"
+          t = requests.get(f"{B}/tickers?productType=USDT-FUTURES", timeout=15).json()
+          out = {"tickers_head": {k: v for k, v in t.items() if k != "data"}, "tickers_n": len(t.get("data") or []),
+                 "tickers_sample": (t.get("data") or [])[:3], "symbols": sorted(x["symbol"] for x in t.get("data") or [])}
+          for g in ("5m", "1Dutc"):
+              out[f"candles_{g}"] = requests.get(f"{B}/candles?symbol=BTCUSDT&productType=USDT-FUTURES&granularity={g}&limit=6", timeout=15).json()
+          json.dump(out, open("out/probe/bitget_sample.json", "w"), indent=1)
+          PY
           for i in $(seq 1 24); do
             code=$(curl -s -m 90 -o out/probe/railway.json -w '%{http_code}' -H "X-Api-Read-Token: $TOKEN" "$BASE/api/net-probe")
             echo "railway try $i: $code"
