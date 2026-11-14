@@ -661,10 +661,68 @@ def format_summary(signals, positions, now_ms, windows=(7, 30), tracks=(), paper
     return "\n".join(lines)
 
 
+# v2.82 짧은 요약 — 사용자 2026-11-15 "이게 너무 복잡해서 거의 쓸모가 없어. 쉽고 눈에 읽히기 쉽게".
+# 질문 세 개(봇 포지션 성적 / 추가 진입 / 신호의 역행)에만 답하고 앞에 🟢🟡🔴. 예전 전체 요약은 `요약 자세히`.
+# 색 기준은 AI(Claude) 어림값 — 측정 근거 없음, 읽기 쉽게 하려는 표시일 뿐 판정이 아니다:
+BRIEF_FLAT_PCT = 0.05          # 건당 평균이 ±0.05% 안이면 🟡(수수료 수준)
+BRIEF_TOUCH2_WARN = (15, 30)   # 신호 중 −2% 먼저 간 비율 %: 15 미만 🟢 · 30 미만 🟡 · 그 이상 🔴
+
+
+def _dot_avg(x):
+    if x is None:
+        return "⚪"
+    return "🟢" if x > BRIEF_FLAT_PCT else ("🔴" if x < -BRIEF_FLAT_PCT else "🟡")
+
+
+def _closed_avg(positions, now_ms, days):
+    ps = [p for p in cp._window(positions, now_ms, days) if cp.is_v244(p) and p["status"] == "closed"]
+    return cp._avg(p["result_pct"] for p in ps)
+
+
+def format_brief(signals, positions, now_ms, tracks=()):
+    nz = datetime.fromtimestamp(now_ms / 1000, timezone.utc).astimezone(NZ_TZ)
+    s = cp.summarize_positions(positions, now_ms, 7)
+    br = s["by_result"]
+    avg7 = _closed_avg(positions, now_ms, 7)
+    lines = [f"📊 코인 7일 ({nz.strftime('%m/%d')})"]
+    if s["n"]:
+        lines.append(f"{_dot_avg(avg7)} 봇 포지션 {s['n']}개: 익절 {br['hit_tp']} · 포기 {br['giveup']}"
+                     + (f" · 만료 {br['expired']}" if br["expired"] else "")
+                     + (f" · 보유 {s['open']}" if s["open"] else "")
+                     + (f" (건당 {cp.fmt_pct(avg7)})" if avg7 is not None else ""))
+    else:
+        lines.append("⚪ 봇 포지션 없음")
+    wa, na = s["with_adds"], s["no_adds"]
+    if wa["n"]:
+        lines.append(f"{_dot_avg(wa['avg'])} 추가 진입한 건 {wa['n']}개 중 {wa['tp']}개 익절"
+                     + (f" (추가 안 한 건 {na['n']}개 중 {na['tp']}개)" if na["n"] else ""))
+    sent = signal_counts(signals, now_ms, 7)["sent"]
+    t_ok, t_w = st.summarize(tracks, now_ms, 7, True), st.summarize(tracks, now_ms, 7, False)
+    n_tr, t2 = t_ok["n"] + t_w["n"], t_ok["touch2"] + t_w["touch2"]
+    if n_tr:
+        r = t2 / n_tr * 100
+        dot = "🟢" if r < BRIEF_TOUCH2_WARN[0] else ("🟡" if r < BRIEF_TOUCH2_WARN[1] else "🔴")
+        lines.append(f"{dot} 신호 {sent}개 · 그중 {t2}개가 {MINUS}2% 먼저 갔다 왔어")
+    else:
+        lines.append(f"⚪ 신호 {sent}개")
+    s30 = cp.summarize_positions(positions, now_ms, 30)
+    a30 = _closed_avg(positions, now_ms, 30)
+    if s30["n"]:
+        lines.append(f"30일: 봇 포지션 {s30['n']}개 · 익절 {s30['by_result']['hit_tp']}"
+                     + (f" · 건당 {cp.fmt_pct(a30)}" if a30 is not None else ""))
+    lines.append("자세히: <code>요약 자세히</code>")
+    return "\n".join(lines)
+
+
+def detail_text(path=None, pos_path=None, now_ms=None, track_path=None):
+    """예전 전체 요약(명령 `요약 자세히`). v1 종이 매매 줄은 뺐다 — 7년 검증 불합격(프로젝트 문서 코인-설계-v1)."""
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    return format_summary(load_signals(path), cp.load_positions(pos_path), now_ms, tracks=st.load_tracks(track_path))
+
+
 def daily_summary(send, path=None, pos_path=None, now_ms=None, track_path=None, paper_path=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    send(format_summary(load_signals(path), cp.load_positions(pos_path), now_ms,
-                        tracks=st.load_tracks(track_path), paper=pv.load(paper_path)["trades"]))
+    send(format_brief(load_signals(path), cp.load_positions(pos_path), now_ms, tracks=st.load_tracks(track_path)))
 
 
 # ── 등록 ──────────────────────────────────────────────────────────────
