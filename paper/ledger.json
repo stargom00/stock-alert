@@ -1,0 +1,28 @@
+{
+ "last_day": null,
+ "trades": [],
+ "blocked": {},
+ "log": [],
+ "rule": {
+  "version": "v2",
+  "registered": "2026-11-14",
+  "start": "2026-11-15",
+  "spike_pct": 40.0,
+  "lookback_bars": 12,
+  "bb_min": 10.0,
+  "dev_min": 30.0,
+  "tp_pct": 20.0,
+  "sl_pct": 100.0,
+  "hold_hours": 48,
+  "block_hours": 48,
+  "fee_pct": 0.1
+ },
+ "stats": {
+  "n": 0,
+  "open": 0,
+  "tp": 0,
+  "stop": 0,
+  "time": 0
+ },
+ "updated_utc": "2026-11-14T11:29Z"
+}
