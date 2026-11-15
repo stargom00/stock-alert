@@ -37,10 +37,11 @@ def test_falling_market_reads_bearish_and_below():
     closes = [100 * (0.995 ** i) for i in range(300)]          # 계속 내림
     s = cb.tf_state(bars_from(closes))
     assert s["cur"]["bear"] is True and s["pos"] == "아래"
-    assert s["ma20"] < 0 and s["ma99"] < 0
+    assert s["ma10"] < 0 and s["ma20"] < 0 and s["ma99"] < 0
+    assert abs(s["close"] / (1 + s["ma10"] / 100) - sum(closes[-10:]) / 10) < 1e-6
     assert s["stoch"] == 0 and s["stoch_n"] >= 2               # 쭉 내리면 Stoch RSI는 바닥에 붙음
     line = cb.tf_line("4h", s)
-    assert line.startswith(" 4h") and "하락 구름" in line and "가격 아래" in line and "Stoch 0" in line and "99선 −" in line
+    assert line.startswith(" 4h") and "하락 구름" in line and "가격 아래" in line and "Stoch 0" in line and "10선 −" in line and "99선 −" in line
 
 
 def test_rising_market_reads_bullish_and_above():
@@ -72,6 +73,10 @@ def test_board_uses_closed_bars_and_survives_one_failure():
     assert any(l.startswith(" 1h") for l in lines) and any(l.startswith(" 4h") for l in lines)
     assert "⚠️ 조회 실패: 2h" in out and out.endswith("참고용 · 7년 검증에서 구름·스토캐스틱 단독은 우위 거의 없음")
     assert out.count("뒤 구름:") == 1
+    import re
+    m = re.search(r"일봉 10선 ([\d,]+) \(마감 봉 기준, 매일 바뀜\)", out)
+    closes = [100 * (0.995 ** i) for i in range(401)][:-1]
+    assert m and int(m.group(1).replace(",", "")) == round(sum(closes[-10:]) / 10)
 
 
 def test_command_wired():

@@ -2,7 +2,7 @@
 
 사용자 지시 2026-11-15 "1번부터 5번까지 모두 다 해줘"의 5번: 채널(투결혼)이 판단에 쓰는 것을 한 화면에 —
 1h·2h·4h·1d 스토캐스틱 0/100 연속 마감, 일목 구름(지금 구름·26봉 뒤에 그려질 구름) 방향·두께, 가격이
-구름 위/안/아래, 20선·99선 대비 위치. 판정·추천은 하지 않는다(묘사만).
+구름 위/안/아래, 10선·20선·99선 대비 위치. 판정·추천은 하지 않는다(묘사만).
 
 7년 검증(프로젝트 문서 `코인-채널방식-검증`, 2026-11-15): 구름·위치 단독으로는 매매 우위가 거의 없었다 — 2h 하락 구름이
 두꺼울 때 다음 24h가 평균보다 약했던 것(7년 중 5년)이 가장 일관된 차이였고, 그것도 숏 보유 규칙으로 바꾸면 7년 합 +1%.
@@ -117,7 +117,7 @@ def tf_state(bars):
            "lead_rank": _rank(bars, lead["thick"], _lead_cloud) if lead else None}
     if cur:
         out["pos"] = "위" if px > cur["top"] else ("아래" if px < cur["bot"] else "안")
-    for n_ in (20, 99):
+    for n_ in (10, 20, 99):        # v2.83 10선 추가(사용자 2026-11-15, 채널이 일봉 반등 목표로 씀)
         if len(closes) >= n_:
             ma = sum(closes[-n_:]) / n_
             out[f"ma{n_}"] = (px / ma - 1) * 100
@@ -129,7 +129,7 @@ def tf_line(tf, s):
     if s["stoch"] is not None:
         parts.append(f"Stoch {s['stoch']}" + (f" {s['stoch_n']}연속" if s["stoch_n"] >= 2 else " 마감"))
     parts.append(_label(s["cur"], s["cur_rank"]) + (f", 가격 {s['pos']}" if s.get("pos") else ""))
-    mas = " ".join(f"{n}선 {_pct(s[f'ma{n}'])}" for n in (20, 99) if f"ma{n}" in s)
+    mas = " ".join(f"{n}선 {_pct(s[f'ma{n}'])}" for n in (10, 20, 99) if f"ma{n}" in s)
     if mas:
         parts.append(mas)
     return f"{tf:>3}  " + " · ".join(parts)
@@ -139,6 +139,7 @@ def board(fetch=lv.fetch_klines, now_ms=None):
     import time
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     lines, leads, fails, px = [], [], [], None
+    day10 = None
     for tf in TFS:
         try:
             bars = lv.closed_only(fetch(SYMBOL, tf, limit=FETCH), now_ms)
@@ -147,6 +148,9 @@ def board(fetch=lv.fetch_klines, now_ms=None):
             s = tf_state(bars)
             px = px or s["close"]
             lines.append(tf_line(tf, s))
+            if tf == "1d" and "ma10" in s:
+                ma10 = s["close"] / (1 + s["ma10"] / 100)
+                day10 = f"일봉 10선 {ma10:,.0f} (마감 봉 기준, 매일 바뀜)"
             if s["lead"]:
                 leads.append(f"{tf} {_label(s['lead'], s['lead_rank'])}")
         except Exception as e:                  # noqa: BLE001 — 한 주기 실패가 판 전체를 막지 않게
@@ -155,6 +159,8 @@ def board(fetch=lv.fetch_klines, now_ms=None):
     when = datetime.fromtimestamp(now_ms / 1000, NZ).strftime("%m-%d %H:%M")
     head = f"📋 <b>BTC 상황</b> {px:,.0f} ({when} NZ, 마감 봉 기준)" if px else f"📋 <b>BTC 상황</b> ({when} NZ)"
     out = [head] + lines
+    if day10:
+        out.append(day10)
     if leads:
         out.append("뒤 구름: " + " · ".join(leads))
     if fails:
