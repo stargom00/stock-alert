@@ -62,7 +62,7 @@ def test_board_uses_closed_bars_and_survives_one_failure():
     def fetch(sym, tf, limit=0):
         if tf == "2h":
             raise RuntimeError("down")
-        closes = [100 * (0.995 ** i) for i in range(401)]
+        closes = [100_000 * (0.995 ** i) for i in range(401)]
         b = bars_from(closes)
         b[-1]["c"] = 9999.0                                      # 마감 전 봉(T ≥ now) — 쓰이면 안 됨
         b[-1]["T"] = now + 1
@@ -75,7 +75,7 @@ def test_board_uses_closed_bars_and_survives_one_failure():
     assert out.count("뒤 구름:") == 1
     import re
     m = re.search(r"일봉 10선 ([\d,]+) \(마감 봉 기준, 매일 바뀜\)", out)
-    closes = [100 * (0.995 ** i) for i in range(401)][:-1]
+    closes = [100_000 * (0.995 ** i) for i in range(401)][:-1]
     assert m and int(m.group(1).replace(",", "")) == round(sum(closes[-10:]) / 10)
 
 
