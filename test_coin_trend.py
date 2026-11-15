@@ -101,7 +101,9 @@ def test_register_routes_signal_jobs_to_sig_sender(monkeypatch):
     monkeypatch.setattr(tr.pv, "track_open", lambda f: None)
     import coin_trend
     monkeypatch.setattr(coin_trend, "check", lambda send: send("⚪ 50일선"))
+    monkeypatch.setattr(tr, "_board", lambda: "📋 판")          # v2.85 상황판 하루 세 번도 신호 무음과 무관하게 발송
+    monkeypatch.setenv("SPIKE_ALERTS", "0")
     tr.register(sched, lambda msg, chat_id=None: out.append(msg))
     for j in jobs:
         j()
-    assert out == ["⚪ 50일선"]
+    assert out == ["⚪ 50일선", "📋 판", "📋 판", "📋 판"]

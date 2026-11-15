@@ -754,6 +754,28 @@ def senders(send_telegram, env=None):
     return send, (send if on else quiet)
 
 
+def board_times(env=None):
+    """v2.85 사용자 2026-11-15 "상황알림을 자동으로 하루세번 보내줘. am9,pm3,pm9시" → 뉴질랜드 09:00·15:00·21:00.
+    COIN_BOARD_TIMES_NZ="09:00,15:00,21:00"로 바꿀 수 있고, 빈 값이면 끔."""
+    env = os.environ if env is None else env
+    raw = env.get("COIN_BOARD_TIMES_NZ", "09:00,15:00,21:00")
+    out = []
+    for x in raw.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        h, m = x.split(":")
+        if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
+            raise ValueError(f"COIN_BOARD_TIMES_NZ 시각이 이상하다: {x}")
+        out.append(f"{int(h):02d}:{int(m):02d}")
+    return out
+
+
+def _board():
+    import coin_board
+    return coin_board.board()
+
+
 def register(sched, send_telegram):
     """main.py가 호출. 스케줄 등록 + HTTP 서버(Webhook·조회 API) 기동."""
     send, sig_send = senders(send_telegram)
@@ -768,6 +790,8 @@ def register(sched, send_telegram):
     sched.every().day.at(CONFIG["SUMMARY_TIME_NZ"], "Pacific/Auckland").do(
         _safe(lambda: daily_summary(sig_send), "요약"))
     sched.every(5).minutes.do(_safe(lambda: coin_trend.check(send), "50일선"))   # v2.71 이것만 기본으로 발송
+    for at in board_times():                                                   # v2.85 상황판 하루 세 번
+        sched.every().day.at(at, "Pacific/Auckland").do(_safe(lambda: send(_board()), f"상황판 {at}"))
     if os.environ.get("SPIKE_ALERTS", "1").strip().lower() not in ("0", "false", "no", "off"):
         import spike_alert                                                      # v2.78 급등 숏 자리 알림(주문 없음)
         sched.every(1).minutes.do(_safe(lambda: spike_alert.check(send), "급등숏"))
