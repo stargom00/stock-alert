@@ -41,7 +41,7 @@ def test_falling_market_reads_bearish_and_below():
     assert abs(s["close"] / (1 + s["ma10"] / 100) - sum(closes[-10:]) / 10) < 1e-6
     assert s["stoch"] == 0 and s["stoch_n"] >= 2               # 쭉 내리면 Stoch RSI는 바닥에 붙음
     line = cb.tf_line("4h", s)
-    assert line.startswith(" 4h") and "하락 구름" in line and "가격 아래" in line and "Stoch 0" in line and "10선 −" in line and "99선 −" in line
+    assert line.startswith("4h 🔴 구름 아래") and "Stoch 0 ×" in line and "선" not in line   # v2.84 짧은 줄
 
 
 def test_rising_market_reads_bullish_and_above():
@@ -69,14 +69,24 @@ def test_board_uses_closed_bars_and_survives_one_failure():
         return b
     out = cb.board(fetch=fetch, now_ms=now)
     lines = out.split("\n")
-    assert lines[0].startswith("📋 <b>BTC 상황</b>") and "9,999" not in lines[0]
-    assert any(l.startswith(" 1h") for l in lines) and any(l.startswith(" 4h") for l in lines)
-    assert "⚠️ 조회 실패: 2h" in out and out.endswith("참고용 · 7년 검증에서 구름·스토캐스틱 단독은 우위 거의 없음")
-    assert out.count("뒤 구름:") == 1
+    assert lines[0].startswith("📋 <b>BTC ") and "9,999" not in lines[0] and len(lines[0]) < 40
+    assert [l[:3] for l in lines[1:4]] == ["1h ", "4h ", "1d "]                   # 2h는 실패
+    assert all(len(l) <= 40 for l in lines), [l for l in lines if len(l) > 40]   # 휴대폰 한 줄
+    assert "⚠️ 조회 실패: 2h" in out and out.endswith("참고용 · 7년 검증 우위 없음")
+    assert "뒤 구름: 전부 하락" in out
     import re
-    m = re.search(r"일봉 10선 ([\d,]+) \(마감 봉 기준, 매일 바뀜\)", out)
+    m = re.search(r"🎯 일봉 10선 ([\d,]+) \(\+([\d.]+)%\)", out)
     closes = [100_000 * (0.995 ** i) for i in range(401)][:-1]
-    assert m and int(m.group(1).replace(",", "")) == round(sum(closes[-10:]) / 10)
+    ma = sum(closes[-10:]) / 10
+    assert m and int(m.group(1).replace(",", "")) == round(ma)
+    assert float(m.group(2)) == round((ma / closes[-1] - 1) * 100, 1)
+
+
+def test_lead_summary():
+    assert cb._lead_summary([("1h", True), ("4h", True)]) == "전부 하락"
+    assert cb._lead_summary([("1h", False)]) == "전부 상승"
+    assert cb._lead_summary([("1h", True), ("4h", False)]) == "1h 하락 · 4h 상승"
+    assert cb._lead_summary([]) is None
 
 
 def test_command_wired():

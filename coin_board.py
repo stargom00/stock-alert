@@ -125,21 +125,33 @@ def tf_state(bars):
 
 
 def tf_line(tf, s):
-    parts = []
+    """v2.84 한 줄 짧게(사용자 2026-11-15 "항상 알림은 보기쉽고 간단하게"): 점 = 가격이 구름 위🟢/안🟡/아래🔴,
+    두꺼운 구름이면 (두꺼움), 스토캐스틱은 0/100일 때만."""
+    pos = s.get("pos")
+    dot = {"위": "🟢", "안": "🟡", "아래": "🔴"}.get(pos, "⚪")
+    parts = [f"구름 {pos}" if pos else "구름 ?"]
+    if s["cur"] and s["cur_rank"] is not None and s["cur_rank"] >= 2 / 3:
+        parts[0] += " (두꺼움)"
     if s["stoch"] is not None:
-        parts.append(f"Stoch {s['stoch']}" + (f" {s['stoch_n']}연속" if s["stoch_n"] >= 2 else " 마감"))
-    parts.append(_label(s["cur"], s["cur_rank"]) + (f", 가격 {s['pos']}" if s.get("pos") else ""))
-    mas = " ".join(f"{n}선 {_pct(s[f'ma{n}'])}" for n in (10, 20, 99) if f"ma{n}" in s)
-    if mas:
-        parts.append(mas)
-    return f"{tf:>3}  " + " · ".join(parts)
+        parts.append(f"Stoch {s['stoch']}" + (f" ×{s['stoch_n']}" if s["stoch_n"] >= 2 else ""))
+    return f"{tf} {dot} " + " · ".join(parts)
+
+
+def _lead_summary(leads):
+    """leads = [(tf, bear)] → '전부 하락' / '전부 상승' / '1h 하락 · 4h 상승'."""
+    if not leads:
+        return None
+    if all(b for _, b in leads):
+        return "전부 하락"
+    if not any(b for _, b in leads):
+        return "전부 상승"
+    return " · ".join(f"{tf} {'하락' if b else '상승'}" for tf, b in leads)
 
 
 def board(fetch=lv.fetch_klines, now_ms=None):
     import time
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    lines, leads, fails, px = [], [], [], None
-    day10 = None
+    lines, leads, fails, px, day10 = [], [], [], None, None
     for tf in TFS:
         try:
             bars = lv.closed_only(fetch(SYMBOL, tf, limit=FETCH), now_ms)
@@ -148,22 +160,22 @@ def board(fetch=lv.fetch_klines, now_ms=None):
             s = tf_state(bars)
             px = px or s["close"]
             lines.append(tf_line(tf, s))
-            if tf == "1d" and "ma10" in s:
-                ma10 = s["close"] / (1 + s["ma10"] / 100)
-                day10 = f"일봉 10선 {ma10:,.0f} (마감 봉 기준, 매일 바뀜)"
             if s["lead"]:
-                leads.append(f"{tf} {_label(s['lead'], s['lead_rank'])}")
+                leads.append((tf, s["lead"]["bear"]))
+            if tf == "1d" and "ma10" in s:
+                day10 = (s["close"] / (1 + s["ma10"] / 100), -s["ma10"] / (1 + s["ma10"] / 100))
         except Exception as e:                  # noqa: BLE001 — 한 주기 실패가 판 전체를 막지 않게
             fails.append(tf)
             print(f"[상황판] {tf} 실패: {type(e).__name__}: {e}")
-    when = datetime.fromtimestamp(now_ms / 1000, NZ).strftime("%m-%d %H:%M")
-    head = f"📋 <b>BTC 상황</b> {px:,.0f} ({when} NZ, 마감 봉 기준)" if px else f"📋 <b>BTC 상황</b> ({when} NZ)"
-    out = [head] + lines
+    when = datetime.fromtimestamp(now_ms / 1000, NZ).strftime("%H:%M")
+    out = [f"📋 <b>BTC {px:,.0f}</b> · {when}" if px else f"📋 <b>BTC</b> · {when}"] + lines
     if day10:
-        out.append(day10)
-    if leads:
-        out.append("뒤 구름: " + " · ".join(leads))
+        ma, gap = day10                          # gap = 지금 가격에서 10선까지 %(위면 +)
+        out.append(f"🎯 일봉 10선 {ma:,.0f} ({_pct(gap)})")
+    ls = _lead_summary(leads)
+    if ls:
+        out.append(f"뒤 구름: {ls}")
     if fails:
         out.append("⚠️ 조회 실패: " + ", ".join(fails))
-    out.append("참고용 · 7년 검증에서 구름·스토캐스틱 단독은 우위 거의 없음")
+    out.append("참고용 · 7년 검증 우위 없음")
     return "\n".join(out)
