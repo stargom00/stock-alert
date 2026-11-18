@@ -289,13 +289,40 @@ def _tv(ticker):
 
 def digest_text(r):
     """v2.63 매물 소화 일수(스캐너 v5.382 overhang): 바로 위 +10% 가격대에서 지난 1년 거래된 물량 ÷ 평소(20일 평균) 거래량.
-    AI 어림값 · 이미 판 물량을 못 빼서 실제보다 크게 나옴(상한). 표시 전용."""
+    AI 어림값 · 이미 판 물량을 못 빼서 실제보다 크게 나옴(상한). 표시 전용. v2.86 짧게: "매물 N일"."""
     d = r.get("digest_days")
     if d is None:
         return ""
     if d < 0.5:
-        return " · 위 매물 거의 없음"
-    return f" · 위 매물 소화 ~{d:.0f}일"   # v2.66 오늘 속도 뺌 — 소화 일수 ÷ 거래량 배수라 새 정보가 없음(사용자 확인)
+        return "매물 거의 없음"
+    return f"매물 {d:.0f}일"
+
+
+def value_text(v):
+    """v2.86 거래대금(원) → "52억"·"1.2조"·"0.4억". 장중은 지금까지 거래된 금액(환산 안 함)."""
+    if v is None:
+        return ""
+    eok = float(v) / 1e8
+    if eok >= 10000:
+        return f"{eok / 10000:.1f}조"
+    if eok >= 10:
+        return f"{eok:,.0f}억"
+    return f"{eok:.1f}억"
+
+
+HOT_VOL_X = 2.0   # 🔥 표시 기준 — Claude 어림값(측정 근거 없음), 표시 전용
+
+
+def kr_row(r):
+    """v2.86 사용자 "거래량도 찾아서보내줘. 그리고 조금 보기 쉽게 바꿔줘. 간단히" → 종목당 두 줄.
+    1줄: 이름(차트 링크) 가격 등락률 / 2줄: 거래대금 · 거래량 배수(2배 이상 🔥) · 선 위 % · 매물."""
+    chg, vx = r.get("change_pct"), r.get("vol_x")
+    l1 = f"<b>{r.get('name')}</b> {_tv(r.get('ticker'))} {_fmt(r['close'], 'kr')}" + (f" {chg:+.1f}%" if chg is not None else "")
+    parts = [p for p in (value_text(r.get("value")),
+                         (f"거래량 {vx:.1f}배" + (" 🔥" if vx >= HOT_VOL_X else "")) if vx is not None else "",
+                         f"선+{r['dist_pct']:.0f}%" if r.get("dist_pct", 0) >= 0 else f"선{r['dist_pct']:.0f}%",
+                         digest_text(r)) if p]
+    return f"{l1}\n   └ " + " · ".join(parts)
 
 
 def format_kr(p):
@@ -305,27 +332,19 @@ def format_kr(p):
     if p.get("mode") == "intraday":
         if not total:
             return None
-        head = f"📈 <b>국내 전체 120·240일선 돌파 시도 — 장중</b> (장 {p.get('elapsed_pct')}% 경과 · 잠정)"
+        head = f"📈 <b>120·240일선 돌파 시도</b> · 장중 {p.get('elapsed_pct'):.0f}% (잠정)"
     else:
-        head = f"📈 <b>국내 전체 120·240일선 상향 돌파 — 마감</b> ({p.get('session_date')} 확정)"
-    out = [head, f"대상 {p.get('n_checked')}종목 (시총 1000억 이상 · 스팩 제외)"]
+        head = f"📈 <b>120·240일선 돌파</b> · 마감 {p.get('session_date')}"
+    out = [head]
     for w in ("240", "120"):
         rows = hits.get(w) or []
-        out += ["", f"<b>{w}일선</b> {int(n.get(w) or 0)}종목 (거래대금 순)"]
+        out += ["", f"━ <b>{w}일선 {int(n.get(w) or 0)}종목</b> (거래대금 순)"]
         for r in rows[:KR_SHOW]:
-            chg = r.get("change_pct")
-            vx = r.get("vol_x")
-            out.append(f"· <b>{r.get('name')}</b> {_tv(r.get('ticker'))} {_fmt(r['close'], 'kr')}"
-                       + (f" ({chg:+.1f}%)" if chg is not None else "")
-                       + f" · 선 {r['dist_pct']:+.1f}%"
-                       + (f" · 거래량 {vx:.1f}배" if vx is not None else "")
-                       + digest_text(r))
+            out.append(kr_row(r))
         if int(n.get(w) or 0) > KR_SHOW:
             out.append(f"…외 {int(n[w]) - KR_SHOW}종목")
-    out += ["", "· 거래량 = 직전 20일 평균 대비(장중은 경과 시간 환산)",
-            "· 매물 소화 = 바로 위 +10% 가격대에서 지난 1년 거래된 물량 ÷ 평소 하루 거래량(어림값 · 실제보다 크게 나옴)",
-            "· 장중은 잠정 — 종가로 판정, 돌파 성패는 다음 며칠 거래량",
-            "· 측정 전 관심 신호"]
+    out += ["", f"<i>대상 {p.get('n_checked')}종목(시총 1000억↑) · 거래량 = 20일 평균 대비 · 🔥 2배↑ · "
+                "매물 = 위 +10% 구간 물량 ÷ 평소 하루 거래량(어림값) · 종가로 판정 · 측정 전 관심 신호</i>"]
     return "\n".join(out)
 
 

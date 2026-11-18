@@ -144,7 +144,8 @@ def test_equality_boundaries():
 
 # ── v2.59 KR 전체 ───────────────────────────────────────────────────
 def _payload(mode="close", n240=1, n120=20, reason=None, session="2026-11-12"):
-    row = {"ticker": "034020.KS", "name": "두산에너빌리티", "close": 61000.0, "change_pct": 4.2, "dist_pct": 1.3, "vol_x": 2.4}
+    row = {"ticker": "034020.KS", "name": "두산에너빌리티", "close": 61000.0, "change_pct": 4.2, "dist_pct": 1.3, "vol_x": 2.4,
+           "value": 61000.0 * 860_000}
     p = {"ok": True, "mode": mode, "session_date": session, "elapsed_pct": 75.0, "n_checked": 1800,
          "hits": {"240": [row] * min(n240, 25), "120": [dict(row, vol_x=None)] * min(n120, 25)},
          "n_hits": {"240": n240, "120": n120}}
@@ -166,10 +167,11 @@ def test_kr_due_slots():
 
 def test_format_kr_counts_and_silence():
     msg = m.format_kr(_payload(n120=20))
-    assert msg.count("두산에너빌리티") == 1 + m.KR_SHOW and "…외 5종목" in msg and "240일선</b> 1종목" in msg
-    assert "거래량 2.4배" in msg and msg.count("거래량 ") == 2       # vol_x None 줄은 거래량 표기 없음(+ 안내 줄 1)
+    assert msg.count("두산에너빌리티") == 1 + m.KR_SHOW and "…외 5종목" in msg and "240일선 1종목</b>" in msg
+    assert "거래량 2.4배 🔥" in msg and msg.count("거래량 ") == 2       # vol_x None 줄은 거래량 표기 없음(+ 안내 줄 1)
+    assert msg.count("525억") == 1 + m.KR_SHOW                        # 거래대금 61,000원 × 86만 주 = 524.6억
     assert m.format_kr(_payload("intraday", 0, 0)) is None
-    assert "120일선</b> 0종목" in m.format_kr(_payload("close", 0, 0))
+    assert "120일선 0종목</b>" in m.format_kr(_payload("close", 0, 0))
 
 
 def test_check_kr_dedupe_and_no_bar():
@@ -190,17 +192,28 @@ def test_check_kr_dedupe_and_no_bar():
 
 
 def test_digest_text():
-    assert m.digest_text({"digest_days": 3.6, "digest_days_today": 1.2}) == " · 위 매물 소화 ~4일"
-    assert m.digest_text({"digest_days": 0.2, "digest_days_today": 0.1}) == " · 위 매물 거의 없음"
+    assert m.digest_text({"digest_days": 3.6, "digest_days_today": 1.2}) == "매물 4일"
+    assert m.digest_text({"digest_days": 0.2, "digest_days_today": 0.1}) == "매물 거의 없음"
     assert m.digest_text({}) == ""
     p = _payload()
     p["hits"]["240"][0] = dict(p["hits"]["240"][0], digest_days=12.0, digest_days_today=5.0)
-    assert "위 매물 소화 ~12일" in m.format_kr(p) and "오늘 속도" not in m.format_kr(p)
+    assert "매물 12일" in m.format_kr(p) and "오늘 속도" not in m.format_kr(p)
+
+
+def test_value_text_and_row():
+    assert m.value_text(52.4e8) == "52억" and m.value_text(0.43e8) == "0.4억" and m.value_text(1.23e12) == "1.2조"
+    assert m.value_text(None) == ""
+    r = {"ticker": "437730.KQ", "name": "삼현", "close": 52900.0, "change_pct": 12.7, "dist_pct": 11.4, "vol_x": 1.9,
+         "value": 52.4e8, "digest_days": 56.2}
+    l1, l2 = m.kr_row(r).split("\n")
+    assert "삼현" in l1 and "+12.7%" in l1
+    assert l2.strip() == "└ 52억 · 거래량 1.9배 · 선+11% · 매물 56일"      # 2배 미만은 🔥 없음
+    assert "🔥" in m.kr_row(dict(r, vol_x=2.0))
 
 
 def test_on_demand():
     ok = lambda *a, **k: type("R", (), {"json": lambda self: _payload()})()
-    assert "상향 돌파 — 마감" in m.on_demand("http://x", {}, get=ok)
+    assert "일선 돌파</b> · 마감" in m.on_demand("http://x", {}, get=ok)
     nob = lambda *a, **k: type("R", (), {"json": lambda self: _payload(reason="no_session_bar")})()
     assert "확정 봉이 없어" in m.on_demand("http://x", {}, get=nob)
     boom = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))
