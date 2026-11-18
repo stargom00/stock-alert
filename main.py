@@ -640,11 +640,41 @@ HELP_MESSAGE = (
     "• 아침 9시 시세 요약\n"
     "※ 알림 종목 변경은 Railway의 Variables에서\n"
     "  (ALERTS, MORNING_TICKERS)\n\n"
-    "❓ 이 메시지 다시 보기: <code>알려줘</code> 또는 <code>사용방법</code>"
+    "❓ 이 메시지 다시 보기: <code>알려줘</code> · 짧은 명령어 표: <code>메뉴</code>"
+)
+
+# v2.87 사용자 "명령어를 조회할수있게해줘. 이평마감이었나?" — 짧은 명령어 표. `메뉴`·`명령어`·`/메뉴`·`/start` 등.
+MENU_ALIASES = ("메뉴", "명령어", "명령", "목록", "/메뉴", "/명령어", "/start", "/help", "/menu", "menu")
+MENU_MESSAGE = (
+    "📋 <b>명령어</b>\n\n"
+    "<b>📈 국내 전체 이평 돌파</b>\n"
+    "<code>이평마감</code> 마감 확정 (=<code>이평전체</code>)\n"
+    "<code>이평장중</code> 오늘 장중 잠정\n\n"
+    "<b>👀 내 감시</b>\n"
+    "<code>이평</code> 120·240일선 거리\n"
+    "<code>이평추가 티커</code> · <code>이평삭제 티커</code>\n"
+    "<code>빗각</code> 빗각 현황\n\n"
+    "<b>🔎 조회</b>\n"
+    "<code>삼성전자</code> · <code>AAPL</code> 현재가\n"
+    "<code>AAPL 등락</code> · <code>AAPL 52주</code>\n"
+    "<code>거래대금</code> 시장 거래대금\n\n"
+    "<b>🪙 코인</b>\n"
+    "<code>BTC</code> 현재가 · <code>상황</code> 상황판\n"
+    "<code>요약 자세히</code> 코인 요약 전체\n\n"
+    "<b>📚 훈련</b>\n"
+    "<code>훈련</code> 오늘 할 일\n"
+    "<code>훈련시간 09:30</code> · <code>훈련끄기</code>\n\n"
+    "<code>알려줘</code> 자세한 설명 · <code>아이디</code> 방 id"
 )
 
 def handle_message(text, chat_id):
     text = text.strip()
+    if text.startswith("/"):
+        text = text.split("@")[0].strip()          # /start@봇이름 → /start
+
+    if text in MENU_ALIASES:
+        send_telegram(MENU_MESSAGE, chat_id)
+        return
 
     # 도움말 요청
     if text in ("알려줘", "사용방법", "사용법", "도움말", "도움", "help", "HELP", "?"):
@@ -682,7 +712,7 @@ def handle_message(text, chat_id):
         import ma_cross
         send_telegram(ma_cross.status_text(get_stock_data), chat_id)
         return
-    if text in ("이평전체", "이평 전체", "이평장중"):   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
+    if text in ("이평전체", "이평 전체", "이평장중", "이평마감", "이평 마감"):   # v2.87 이평마감 = 이평전체   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
         import ma_cross
         send_telegram(ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS, "intraday" if text == "이평장중" else "close"), chat_id)
         return
@@ -734,7 +764,7 @@ def handle_message(text, chat_id):
             ticker = code
             data = get_stock_data(code)
     if not data:
-        send_telegram(f"❌ <b>{raw}</b> 를 찾을 수 없어요.\n이름이나 코드를 확인해주세요.\n\n예: 삼성전자, 네이버, 애플\n또는: AAPL, 005930.KS\n코인: BTC, ETH, SOL", chat_id)
+        send_telegram(f"❌ <b>{raw}</b> 를 찾을 수 없어요.\n이름이나 코드를 확인해주세요.\n\n예: 삼성전자, 네이버, 애플\n또는: AAPL, 005930.KS\n코인: BTC, ETH, SOL\n\n📋 명령어 목록: <code>메뉴</code>", chat_id)
         return
 
     price_str = format_price(data["price"], data["currency"])
@@ -3003,6 +3033,6 @@ while True:
         msg = update.get("message", {})
         text = msg.get("text", "")
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        if text and not text.startswith("/"):
+        if text and (not text.startswith("/") or text.split("@")[0].strip() in MENU_ALIASES):   # v2.87 /메뉴·/start
             handle_message(text, chat_id)
     time.sleep(1)
