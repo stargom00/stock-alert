@@ -3021,9 +3021,15 @@ training.register(schedule, send_telegram)
 
 check_alerts()
 
+import coin_bot  # v2.91 코인 전용 봇 — COIN_TELEGRAM_TOKEN 이 있을 때만 새 봇 메시지를 읽고 답한다
+_coin_poller = coin_bot.Poller(coin_bot.token()) if coin_bot.token() else None
+print(f"[코인봇] {'켜짐 — 코인 알림·명령은 새 봇' if _coin_poller else '꺼짐 — 코인 알림은 얼마냐봇'}")
+
 last_update_id = None
 while True:
     schedule.run_pending()
+    if _coin_poller:
+        _coin_poller.poll()
     updates = get_updates(offset=last_update_id)
     for update in updates:
         last_update_id = update["update_id"] + 1

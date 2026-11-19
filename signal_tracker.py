@@ -744,7 +744,13 @@ def senders(send_telegram, env=None):
     env = os.environ if env is None else env
     chat_id = env.get("COIN_CHAT_ID") or None
 
+    import coin_bot   # v2.91 COIN_TELEGRAM_TOKEN 이 있으면 코인 알림은 새 코인 봇으로(실패 시 얼마냐봇에 ⚠️ 붙여 보냄)
+    _new = coin_bot.make_sender(send_telegram, env)
+
     def send(msg):
+        if _new:
+            _new(msg)
+            return
         send_telegram(msg, chat_id=chat_id)
 
     def quiet(msg):
