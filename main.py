@@ -657,7 +657,8 @@ MENU_MESSAGE = (
     "<b>🔎 조회</b>\n"
     "<code>삼성전자</code> · <code>AAPL</code> 현재가\n"
     "<code>AAPL 등락</code> · <code>AAPL 52주</code>\n"
-    "<code>거래대금</code> 시장 거래대금\n\n"
+    "<code>거래대금</code> 시장 거래대금\n"
+    "<code>덜빠진</code> 지수 하락 때 덜 빠진 종목\n\n"
     "<b>🪙 코인</b>\n"
     "<code>BTC</code> 현재가 · <code>상황</code> 상황판\n"
     "<code>요약 자세히</code> 코인 요약 전체\n\n"
@@ -715,6 +716,10 @@ def handle_message(text, chat_id):
     if text in ("이평전체", "이평 전체", "이평장중", "이평마감", "이평 마감"):   # v2.87 이평마감 = 이평전체   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
         import ma_cross
         send_telegram(ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS, "intraday" if text == "이평장중" else "close"), chat_id)
+        return
+    if text in ("덜빠진", "덜빠진종목", "덜 빠진", "상대강도", "버틴종목"):   # v2.88 지수 하락 구간 상대강도(스캐너 v5.385)
+        import rs_strong
+        send_telegram(rs_strong.on_demand(SCANNER_URL, _SCANNER_HEADERS), chat_id)
         return
     _mc = text.split()
     if len(_mc) == 2 and _mc[0] in ("이평추가", "이평삭제"):
