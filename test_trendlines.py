@@ -82,7 +82,7 @@ def test_close_check_reports_missing_price():
 
 def test_main_wiring():
     src = open("main.py", encoding="utf-8").read()
-    assert "trendlines.register(schedule, get_stock_data, send_telegram)" in src
+    assert "trendlines.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)" in src
     assert 'if text in ("빗각", "빗각현황", "추세선"):' in src
 
 
@@ -94,3 +94,67 @@ def test_close_digest_shows_note_on_event():
     msg2 = t.close_check("us", lambda tk: {"price": 155.0}, lambda m: None,
                          datetime(2026, 11, 13, 6, 30, tzinfo=KST), [line], {"nv": {"side": "below"}}, persist=False)
     assert "↳" not in msg2
+
+
+# ── v2.90 추적 장부(스캐너 v5.386) ──────────────────────────────────────────
+@pytest.fixture
+def src_reset():
+    keep = dict(t._SRC)
+    t._SRC.update(url=None, headers=None, get=None, lines=None, ts=0.0, **{"from": "local"})
+    yield
+    t._SRC.update(keep)
+
+
+class _Rsp:
+    def __init__(self, j): self.j = j
+    def json(self): return self.j
+
+
+def test_shared_vectors():
+    """스캐너 track_lines.line_value와 같은 값(pullback test_track_lines.py::test_shared_vectors와 같은 숫자)."""
+    log = {"id": "a", "p1": ["2026-01-01", 100.0], "p2": ["2026-04-11", 200.0]}
+    assert t.line_value(log, "2026-02-20") == pytest.approx(100 * 2 ** 0.5, abs=1e-9)
+    assert t.line_value(log, "2026-07-20") == pytest.approx(400.0, abs=1e-9)
+    lin = dict(log, scale="linear")
+    assert t.line_value(lin, "2026-02-20") == pytest.approx(150.0, abs=1e-9)
+    assert t.line_value(lin, "2026-07-20") == pytest.approx(300.0, abs=1e-9)
+
+
+def test_remote_ledger_is_source_and_skips_closed_and_bad(src_reset, capsys):
+    calls = []
+    body = {"ok": True, "lines": [
+        {"id": "tl_h", "ticker": "352820.KS", "name": "하이브", "label": "채널 상단", "kind": "fall", "scale": "log",
+         "p1": ["2026-04-10", 330000], "p2": ["2026-10-20", 185000], "status": "추적", "theme": "한한령"},
+        {"id": "tl_end", "ticker": "NVDA", "name": "끝", "p1": ["2026-01-01", 1], "p2": ["2026-02-01", 2], "status": "종료"},
+        {"id": "tl_bad", "ticker": "NVDA", "name": "틀림", "p1": ["2026-01-01", 1], "p2": ["2026-01-01", 2], "status": "추적"}]}
+    def g(url, params=None, timeout=None, headers=None):
+        calls.append((url, params, headers)); return _Rsp(body)
+    t.configure("https://s", {"X": "1"}, get=g)
+    lines = t.load_lines()
+    assert [x["id"] for x in lines] == ["tl_h"]
+    assert calls[0] == ("https://s/api/track-lines", {"prices": 0}, {"X": "1"})
+    assert "tl_bad" in capsys.readouterr().out                       # 건너뛴 선은 로그에 남는다
+    t.load_lines()
+    assert len(calls) == 1                                           # TTL 안에서는 다시 안 받는다
+    row = t.fmt_line_row(lines[0], 189400.0, "2026-11-19", "kr")
+    assert "하이브" in row and "채널 상단" in row                      # 장부의 선 종류 라벨을 쓴다
+    assert "20개" not in t.status_text(lambda tk: {"price": 189400.0}, lines=None) and "⚠" not in t.status_text(lambda tk: {"price": 189400.0})
+
+
+def test_remote_failure_falls_back(src_reset, capsys):
+    def boom(*a, **k): raise RuntimeError("503")
+    t.configure("https://s", {}, get=boom)
+    lines = t.load_lines()                                           # 받은 적 없음 → 레포 파일
+    assert len(lines) == 19 and "레포 trendlines.json" in capsys.readouterr().out
+    assert "⚠ 장부를 못 읽어 옛 목록" in t.status_text(lambda tk: {"price": 100.0})
+    # 한 번 받은 뒤 실패하면 마지막 장부로 계속
+    ok = {"ok": True, "lines": [{"id": "x", "ticker": "NVDA", "name": "n", "p1": ["2026-01-01", 1.0], "p2": ["2026-02-01", 2.0], "status": "추적"}]}
+    t.configure("https://s", {}, get=lambda *a, **k: _Rsp(ok))
+    assert [x["id"] for x in t.load_lines()] == ["x"]
+    t._SRC["ts"] = 0.0
+    t.configure("https://s", {}, get=boom)
+    assert [x["id"] for x in t.load_lines()] == ["x"] and "마지막 장부" in capsys.readouterr().out
+
+
+def test_no_scanner_url_uses_local(src_reset):
+    assert len(t.load_lines()) == 19

@@ -37,11 +37,16 @@ def line_value(line, on):
     span = (d2 - d1).days
     if span == 0:
         raise ValueError(f"{line.get('id')}: 두 점 날짜가 같다")
-    return float(p1) * math.exp(math.log(float(p2) / float(p1)) * (on - d1).days / span)
+    k = (on - d1).days / span
+    if line.get("scale") == "linear":                 # v2.90 일반(선형) 차트에서 그은 선 — 스캐너 v5.386 track_lines.line_value와 같은 정의
+        return float(p1) + (float(p2) - float(p1)) * k
+    return float(p1) * math.exp(math.log(float(p2) / float(p1)) * k)
 
 
 def weekly_pct(line):
     (d1, p1), (d2, p2) = line["p1"], line["p2"]
+    if line.get("scale") == "linear":                 # 선형 선은 주당 %가 일정하지 않다 → 두 점 구간의 평균(표시용)
+        return (float(p2) / float(p1) - 1) * 100 / max((_d(d2) - _d(d1)).days / 7, 1e-9)
     per_day = math.log(float(p2) / float(p1)) / (_d(d2) - _d(d1)).days
     return (math.exp(per_day * 7) - 1) * 100
 
@@ -101,7 +106,7 @@ def _fmt(p, market):
 def fmt_line_row(line, price, on, market):
     v = line_value(line, on)
     d = dist_pct(price, v)
-    return (f"· <b>{line.get('name') or line['ticker']}</b> {KIND_LABEL.get(line.get('kind'), '선')} "
+    return (f"· <b>{line.get('name') or line['ticker']}</b> {line.get('label') or KIND_LABEL.get(line.get('kind'), '선')} "
             f"{_fmt(v, market)} · 가격 {_fmt(price, market)} ({d:+.1f}%)")
 
 
@@ -130,7 +135,7 @@ def format_close_digest(rows, market, on):
 
 
 # ── 저장 ─────────────────────────────────────────────────────────────
-def load_lines(path=LINES_PATH):
+def load_local(path=LINES_PATH):
     with open(path, encoding="utf-8") as f:
         lines = json.load(f)
     ids = [x["id"] for x in lines]
@@ -138,6 +143,52 @@ def load_lines(path=LINES_PATH):
     for x in lines:
         line_value(x, x["p2"][0])          # 날짜·가격 형식 검증(잘못이면 기동 때 바로 실패)
     return lines
+
+
+# v2.90 추적 장부(스캐너 v5.386 /track) — 사용자 2026-11-19 "하이브도 내가 채널 다 그려놓고 까먹어서 매매못함" → 선 등록을 화면에서.
+# 장부가 원본이다. 스캐너를 못 읽으면(배포 중·네트워크) 마지막으로 받은 장부, 그것도 없으면 이 레포의 trendlines.json(옛 19개)로 돈다.
+_SRC = {"url": None, "headers": None, "get": None, "lines": None, "ts": 0.0, "from": "local"}
+REMOTE_TTL = 240          # 초 — 접근 점검이 5분마다라 매번 새로 받는다(스캐너 쪽은 파일 읽기 한 번)
+
+
+def configure(scanner_url, headers=None, get=None):
+    _SRC.update(url=scanner_url, headers=headers, get=get)
+
+
+def fetch_remote(now_ts=None):
+    """스캐너 장부 → 추적 중인 선 목록, 실패면 None. 형식이 틀린 선은 건너뛰고 로그(한 줄 때문에 전체가 죽지 않게)."""
+    import time as _t
+    if not _SRC["url"]:
+        return None
+    now_ts = _t.time() if now_ts is None else now_ts
+    if _SRC["lines"] is not None and now_ts - _SRC["ts"] < REMOTE_TTL:
+        return _SRC["lines"]
+    try:
+        import requests as _rq
+        p = (_SRC["get"] or _rq.get)(f"{_SRC['url']}/api/track-lines", params={"prices": 0}, timeout=30, headers=_SRC["headers"]).json()
+        if not p.get("ok"):
+            raise ValueError(p.get("error") or "ok 아님")
+    except Exception as e:
+        print(f"[빗각] 장부 읽기 실패 → {'마지막 장부' if _SRC['lines'] is not None else '레포 trendlines.json'}로 계속: {e}")
+        return _SRC["lines"]
+    out, bad = [], []
+    for x in p.get("lines") or []:
+        if x.get("status") == "종료":
+            continue
+        try:
+            line_value(x, x["p2"][0])
+            out.append(x)
+        except Exception as e:
+            bad.append(f"{x.get('id')}({e})")
+    if bad:
+        print(f"[빗각] 장부에서 형식이 틀린 선 {len(bad)}개 건너뜀: {', '.join(bad)}")
+    _SRC.update(lines=out, ts=now_ts, **{"from": "scanner"})
+    return out
+
+
+def load_lines(path=LINES_PATH):
+    remote = fetch_remote()
+    return remote if remote is not None else load_local(path)
 
 
 def state_path():
@@ -226,7 +277,7 @@ def status_text(get_price, now_kst=None, lines=None):
     """텔레그램 '빗각' 명령 — 지금 가격 기준 모든 선."""
     now = now_kst or datetime.now(KST)
     lines = lines if lines is not None else load_lines()
-    out = ["📐 <b>빗각 추적 중</b>"]
+    out = [f"📐 <b>빗각 추적 중</b> · {len(lines)}개" + ("" if _SRC["from"] == "scanner" else " · ⚠ 장부를 못 읽어 옛 목록")]
     for line in lines:
         mk = market_of(line["ticker"])
         q = get_price(line["ticker"])
@@ -236,7 +287,7 @@ def status_text(get_price, now_kst=None, lines=None):
     return "\n".join(out)
 
 
-def register(sched, get_price, send):
+def register(sched, get_price, send, scanner_url=None, scanner_headers=None):
     def safe(fn, name):
         def run():
             try:
@@ -244,7 +295,9 @@ def register(sched, get_price, send):
             except Exception as e:
                 print(f"[빗각] {name} 오류: {e}")
         return run
-    load_lines()     # 형식이 틀리면 기동 때 바로 실패
+    load_local()     # 레포 파일(폴백) 형식이 틀리면 기동 때 바로 실패
+    if scanner_url:
+        configure(scanner_url, scanner_headers)
     sched.every(5).minutes.do(safe(lambda: check_near(get_price, send), "접근"))
     sched.every().day.at("20:20", "Asia/Seoul").do(safe(lambda: close_check("kr", get_price, send), "KR 종가"))
     sched.every().day.at("16:30", "America/New_York").do(safe(lambda: close_check("us", get_price, send), "US 종가"))

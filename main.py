@@ -3013,7 +3013,7 @@ register_macro_schedule(schedule)  # v2.31 매크로 아침 요약 (MACRO_TIME K
 import signal_tracker  # v2.37 코인 선물 RSI 신호 (자체 판정·Webhook·추적·09:00 NZ 요약, HTTP :$PORT)
 signal_tracker.register(schedule, send_telegram)
 import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 하루 1회 · 장 마감 뒤 종가 점검(KR 20:20 KST · US 16:30 ET)
-trendlines.register(schedule, get_stock_data, send_telegram)
+trendlines.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.90 선 목록 = 스캐너 추적 장부
 import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
 ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)  # v2.59 KR 전체 14:00·20:20 KST
 import training  # v2.60 매일 훈련 알림 — 요일별 오늘 할 일 + 매매 훈련 홈 링크(기본 오클랜드 09:30)
