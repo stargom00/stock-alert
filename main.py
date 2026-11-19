@@ -658,7 +658,8 @@ MENU_MESSAGE = (
     "<code>삼성전자</code> · <code>AAPL</code> 현재가\n"
     "<code>AAPL 등락</code> · <code>AAPL 52주</code>\n"
     "<code>거래대금</code> 시장 거래대금\n"
-    "<code>덜빠진</code> 지수 하락 때 덜 빠진 종목\n\n"
+    "<code>덜빠진</code> 지수 하락 때 덜 빠진 종목\n"
+    "<code>테마</code> 테마 바구니 점화 현황\n\n"
     "<b>🪙 코인</b>\n"
     "<code>BTC</code> 현재가 · <code>상황</code> 상황판\n"
     "<code>요약 자세히</code> 코인 요약 전체\n\n"
@@ -716,6 +717,10 @@ def handle_message(text, chat_id):
     if text in ("이평전체", "이평 전체", "이평장중", "이평마감", "이평 마감"):   # v2.87 이평마감 = 이평전체   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
         import ma_cross
         send_telegram(ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS, "intraday" if text == "이평장중" else "close"), chat_id)
+        return
+    if text in ("테마", "테마점화", "테마 점화", "바구니"):   # v2.92 테마 바구니 현황(스캐너 v5.393)
+        import theme_ignite
+        send_telegram(theme_ignite.on_demand(), chat_id)
         return
     if text in ("덜빠진", "덜빠진종목", "덜 빠진", "상대강도", "버틴종목"):   # v2.88 지수 하락 구간 상대강도(스캐너 v5.385)
         import rs_strong
@@ -3014,6 +3019,8 @@ import signal_tracker  # v2.37 코인 선물 RSI 신호 (자체 판정·Webhook�
 signal_tracker.register(schedule, send_telegram)
 import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 하루 1회 · 장 마감 뒤 종가 점검(KR 20:20 KST · US 16:30 ET)
 trendlines.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.90 선 목록 = 스캐너 추적 장부
+import theme_ignite
+theme_ignite.register(schedule, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.92 테마 점화(스캐너 v5.393 테마 바구니)
 import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
 ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)  # v2.59 KR 전체 14:00·20:20 KST
 import training  # v2.60 매일 훈련 알림 — 요일별 오늘 할 일 + 매매 훈련 홈 링크(기본 오클랜드 09:30)
