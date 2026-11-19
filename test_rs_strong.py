@@ -11,12 +11,17 @@ P = {"ok": True, "session_date": "2026-11-18", "index": W, "n_checked": 1040, "t
 
 def test_format():
     t = rs.format_text(P)
-    assert "KOSPI 10-28 고점 → 11-14 저점 <b>-8.2%</b> · 이후 +3.1%" in t
-    assert "KOSDAQ" in t and t.count("⚠ 하락이 얕음") == 1
-    assert "하락 -2.1% (지수보다 +6.1%p) · 이후 +12% · ✓저점 유지 · ✓50일선 위" in t
-    assert "· 기타" not in t and "✓" not in t.split("신규코드")[1].split("\n")[1]
-    assert 'symbol=KRX:0013V0"' in t                                       # 알파벳 섞인 코드도 6자리 그대로
-    assert "반도체 +5.2%p(8)" in t and "상위 2" in t
+    assert "📉 코스피 <b>-8.2%</b> (10-28→11-14) · 반등 +3.1%" in t
+    assert "코스닥" in t and t.count("⚠얕음") == 1
+    l1 = [x for x in t.split("\n") if "삼성전기" in x][0]
+    assert l1 == ('1. 🟢 <a href="https://www.tradingview.com/chart/?symbol=KRX:009150">삼성전기</a> <b>▲6</b> · -2% · 반등 +12% · <i>전자부품</i>')
+    l2 = [x for x in t.split("\n") if "신규코드" in x][0]
+    assert l2.startswith("2. ⚪ ") and "기타" not in l2 and 'symbol=KRX:0013V0"' in l2
+    assert "반도체 ▲5" in t and "TOP 2</b> / 1040" in t
+
+
+def test_flags():
+    assert [rs.flag({"low_ok": a, "ma50_ok": b}) for a, b in ((1, 1), (1, 0), (0, 1), (0, 0))] == ["🟢", "🟡", "🟡", "⚪"]
 
 
 def test_on_demand_reasons():

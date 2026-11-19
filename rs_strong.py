@@ -1,4 +1,4 @@
-"""v2.88 지수 하락 구간에서 덜 빠진 KR 종목 — 텔레그램 `덜빠진`(사용자 2026-11-19 "지수빠질때 덜빠지는 종목은 어떻게 선별해?" → "만들어줘").
+"""v2.88(v2.89 한 줄 형식) 지수 하락 구간에서 덜 빠진 KR 종목 — 텔레그램 `덜빠진`(사용자 2026-11-19 "지수빠질때 덜빠지는 종목은 어떻게 선별해?" → "만들어줘").
 계산은 스캐너 GET /api/rs-drawdown(v5.385, rs_drawdown.py)이 한다 — 여기는 받아서 보여 주기만.
 **관심 신호 · 측정 전.** 덜 빠진 종목이 회복기에 먼저 오른다는 건 O'Neil·Minervini의 관찰이고 잰 적 없다. 방어주도 덜 빠진다 → 업종을 같이 본다.
 """
@@ -10,39 +10,45 @@ SHOW = 15
 ALIASES = ("덜빠진", "덜빠진종목", "덜 빠진", "상대강도", "버틴종목")
 
 
-def _tv(ticker):
-    t = str(ticker or "").upper()
-    return f'<a href="https://www.tradingview.com/chart/?symbol=KRX:{t[:6]}">{t[:6]}</a>'
+def _link(r):
+    t = str(r.get("ticker") or "").upper()[:6]
+    return f'<a href="https://www.tradingview.com/chart/?symbol=KRX:{t}">{r.get("name") or t}</a>'
 
 
-def _p(x, d=1):
+def _p(x, d=0):
     return f"{x * 100:+.{d}f}%"
 
 
 def _idx_line(name, w):
-    s = (f"{name} {w['peak_date'][5:]} 고점 → {w['trough_date'][5:]} 저점 <b>{_p(w['dd'])}</b> · 이후 {_p(w['reb'])}")
-    return s + ("" if w.get("meaningful") else " · ⚠ 하락이 얕음")
+    nm = {"KOSPI": "코스피", "KOSDAQ": "코스닥"}.get(name, name)
+    s = f"📉 {nm} <b>{_p(w['dd'], 1)}</b> ({w['peak_date'][5:]}→{w['trough_date'][5:]}) · 반등 {_p(w['reb'], 1)}"
+    return s + ("" if w.get("meaningful") else " ⚠얕음")
 
 
-def row_text(r):
-    flags = " · ".join(x for x in ("✓저점 유지" if r.get("low_ok") else "", "✓50일선 위" if r.get("ma50_ok") else "") if x)
+def flag(r):
+    """🟢 저점 유지 + 50일선 위 · 🟡 둘 중 하나 · ⚪ 둘 다 아님."""
+    n = bool(r.get("low_ok")) + bool(r.get("ma50_ok"))
+    return "🟢🟡⚪"[2 - n]
+
+
+def row_text(i, r):
+    """v2.89 사용자 "텍스트 한눈에 보기쉽게" — 종목당 한 줄. 이름에 차트 링크, ▲ = 지수보다 덜 빠진 %p."""
     sec = r.get("sector") or ""
-    l1 = f"<b>{r['name']}</b> {_tv(r['ticker'])}" + (f" · {sec}" if sec and sec != "기타" else "")
-    l2 = f"하락 {_p(r['dd'])} (지수보다 {r['rel_dd'] * 100:+.1f}%p) · 이후 {_p(r['reb'], 0)}" + (f" · {flags}" if flags else "")
-    return f"{l1}\n   └ {l2}"
+    return (f"{i}. {flag(r)} {_link(r)} <b>▲{r['rel_dd'] * 100:.0f}</b> · {_p(r['dd'])} · 반등 {_p(r['reb'])}"
+            + (f" · <i>{sec}</i>" if sec and sec != "기타" else ""))
 
 
 def format_text(p):
     w = p.get("index") or {}
-    out = [f"🛡 <b>지수 하락 구간 · 덜 빠진 종목</b> · {p.get('session_date', '')} 확정"]
+    out = [f"🛡 <b>덜 빠진 종목</b> · {p.get('session_date', '')} 확정", ""]
     out += [_idx_line(k, w[k]) for k in ("KOSPI", "KOSDAQ") if k in w]
-    rows = (p.get("top") or [])[:SHOW]
-    out += ["", f"━ <b>상위 {len(rows)}</b> (지수보다 덜 빠진 순 · 대상 {p.get('n_checked')}종목)"] + [row_text(r) for r in rows]
     sec = p.get("sectors") or []
     if sec:
-        out += ["", "━ <b>업종</b> (지수 대비 중앙값)", " · ".join(f"{s['sector']} {s['rel_dd_med'] * 100:+.1f}%p({s['n']})" for s in sec[:8])]
-    out += ["", "<i>구간 = 각 시장 지수의 최근 60거래일 고점 → 그 뒤 저점 · 저점 유지 = 지수가 저점을 찍을 때 이 종목은 구간 신저가 안 감 · "
-            "방어주도 덜 빠지니 업종·오를 이유를 같이 볼 것 · 측정 전 관심 신호</i>"]
+        out += ["", "🏆 <b>업종</b> (지수보다 덜 빠진 %p)", " · ".join(f"{s['sector']} ▲{s['rel_dd_med'] * 100:.0f}" for s in sec[:6])]
+    rows = (p.get("top") or [])[:SHOW]
+    out += ["", f"📋 <b>종목 TOP {len(rows)}</b> / {p.get('n_checked')}"] + [row_text(i + 1, r) for i, r in enumerate(rows)]
+    out += ["", "<i>▲ 지수보다 덜 빠진 %p · 가운데 % = 구간 등락 · 🟢 저점 유지+50일선 위 🟡 하나만 ⚪ 없음 · "
+            "구간 = 지수 최근 60일 고점→저점 · 방어주도 덜 빠짐 · 측정 전</i>"]
     return "\n".join(out)
 
 
