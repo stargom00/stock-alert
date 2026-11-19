@@ -3,7 +3,7 @@
 
 판정(강한 종목 수·점화)은 전부 스캐너 theme_baskets.py가 한다 — 여기는 받아서 보내기만. 바구니·날짜마다 한 번만 알린다
 (상태: DATA_DIR/theme_ignite_state.json — 재배포로 같은 날 두 번 보내지 않게 파일에 둔다).
-**관심 신호 · 측정 전.** 등락률은 애프터 포함 종가 기준이라 증권사 화면과 다를 수 있다(스캐너 theme_baskets.py docstring).
+**관심 신호 · 측정 전.** v2.93: 등락률은 증권사 화면과 같은 값(전일 정규장 종가 대비 — 스캐너 v5.394).
 
 폴링 창(AI 어림값): KR 평일 09:00~20:10 KST(애프터마켓 종료 + 10분 — 2026-11-18 한한령은 애프터마켓에서 점화했다),
 US 평일 09:30~16:10 뉴욕. 10분마다. 스캐너가 종목 가격을 5분 캐시한다.
@@ -84,19 +84,16 @@ def basket_text(b, lined=(), head="🔥 <b>테마 점화</b>"):
     return "\n".join(out)
 
 
-FOOT = "<i>📐 장부에 선 있음 · 등락률 = 애프터 포함 종가 기준(증권사 화면과 다를 수 있음) · 관심 신호 · 측정 전</i>"
+FOOT = "<i>📐 장부에 선 있음 · 등락률 = 전일 종가 대비(증권사 화면과 같은 기준) · 관심 신호 · 측정 전</i>"
 
 
 def status_line(b):
     sm = b.get("summary") or {}
     if not sm.get("n_px"):
         return f"⚪ <b>{b.get('name')}</b> 가격을 못 받았어"
-    li = b.get("last_ignited")
     lead = sm.get("leader") or {}
     s = (f"{'🔥' if sm.get('ignited') else '⚪'} <b>{b.get('name')}</b> 강한 {sm['strong']}/{sm['n_px']} · 평균 {_p(sm.get('avg_pct'))}"
          + (f" · 대장 {lead.get('name')} {_p(lead.get('chg_pct'))}" if lead else ""))
-    if li and not sm.get("ignited"):
-        s += f"\n   └ 최근 점화 {li['date'][5:]} ({li['strong']}/{li['n_px']})"
     return s
 
 

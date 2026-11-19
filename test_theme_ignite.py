@@ -10,10 +10,10 @@ OPEN = datetime(2026, 11, 18, 19, 30, tzinfo=KST)        # 수요일 애프터�
 CLOSED = datetime(2026, 11, 21, 12, 0, tzinfo=KST)       # 토요일
 
 
-def _basket(id_="tb_h", name="한한령", ignited=True, today=True, status="추적", last=None):
+def _basket(id_="tb_h", name="한한령", ignited=True, today=True, status="추적"):
     rows = [{"ticker": "041510.KQ", "name": "에스엠", "chg_pct": 30.59}, {"ticker": "352820.KS", "name": "하이브", "chg_pct": 16.12},
             {"ticker": "NVDA", "name": "엔비디아", "chg_pct": 5.5}, {"ticker": "035900.KQ", "name": "JYP Ent.", "chg_pct": None}]
-    return {"id": id_, "name": name, "status": status, "rows": rows, "last_ignited": last,
+    return {"id": id_, "name": name, "status": status, "rows": rows,
             "summary": {"strong": 19 if ignited else 2, "n_px": 23, "n_failed": 1, "avg_pct": 12.93, "date": "2026-11-18",
                         "ignited": ignited, "is_today": today, "leader": {"name": "에스엠", "chg_pct": 30.59}}}
 
@@ -80,9 +80,9 @@ def test_state_file_roundtrip(tmp_path, monkeypatch):
 
 
 def test_on_demand():
-    t = ti.on_demand(_get([_basket(), _basket("tb_q", "화장품", ignited=False, last={"date": "2026-11-17", "strong": 8, "n_px": 10}),
+    t = ti.on_demand(_get([_basket(), _basket("tb_q", "화장품", ignited=False),
                            _basket("tb_end", "끝난 테마", status="종료")]))
-    assert "🔥 <b>한한령</b> 강한 19/23" in t and "⚪ <b>화장품</b> 강한 2/23" in t and "최근 점화 11-17 (8/10)" in t
+    assert "🔥 <b>한한령</b> 강한 19/23" in t and "⚪ <b>화장품</b> 강한 2/23" in t
     assert "끝난 테마" not in t and "점화 중" in t and "30% 이상" in t
     assert "조회 실패" in ti.on_demand(_get([], ok=False))
     assert "+ 테마" in ti.on_demand(_get([]))
