@@ -218,6 +218,13 @@ def save_state(st, path=None):
 
 
 # ── 작업 ─────────────────────────────────────────────────────────────
+def _review_log(line, what, on, persist):
+    """v2.95 토요일 주간 리뷰용 기록(review.py). persist=False(테스트·미리보기)면 적지 않는다."""
+    if persist:
+        import review
+        review.log("line", line.get("name") or line.get("ticker"), f"{line.get('label') or '선'} {what}", on)
+
+
 def check_near(get_price, send, now_kst=None, lines=None, state=None, persist=True):
     now = now_kst or datetime.now(KST)
     lines = lines if lines is not None else load_lines()
@@ -238,6 +245,7 @@ def check_near(get_price, send, now_kst=None, lines=None, state=None, persist=Tr
         if abs(dist_pct(price, line_value(line, on))) <= NEAR_PCT:
             rec["near_date"] = str(on)
             send(format_near(line, price, on, mk))
+            _review_log(line, "선 근처 접근", on, persist)
             sent += 1
     if persist:
         save_state(st)
@@ -263,6 +271,8 @@ def close_check(market, get_price, send, now_kst=None, lines=None, state=None, p
         rec = st.setdefault(line["id"], {})
         new_side = side_of(close, line_value(line, on))
         rows.append((line, close, close_event(rec.get("side"), new_side)))
+        if rows[-1][2]:
+            _review_log(line, f"종가 {rows[-1][2]}", on, persist)
         rec["side"], rec["side_date"] = new_side, str(on)
     msg = format_close_digest(rows, market, on)
     if missing:

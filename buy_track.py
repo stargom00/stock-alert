@@ -256,11 +256,17 @@ def close_check(market, get_price, send, now=None, state=None, persist=True):
             if lv is not None and not over:
                 send(alert_text(it, close, pct, lv, on))
                 sent += 1
+                if persist:                    # v2.95 주간 리뷰 기록
+                    import review
+                    review.log("buy", it["name"], f"매수가 대비 {'+' if lv > 0 else ''}{lv}% 단계 {'도달' if lv > 0 else '이탈'}({_p(pct)})", on)
         else:
             failed += 1
         if over:
             send(final_text(it, close, on))
             st["items"].remove(it)
+            if persist:
+                import review
+                review.log("buy", it["name"], f"{TRACK_DAYS}일 추적 끝", on)
             sent += 1
     print(f"[매수추적] {market} {on} — 종목 {len(items)}개 · 알림 {sent}개 · 가격 실패 {failed}개", flush=True)
     if persist:

@@ -140,6 +140,9 @@ def check(send, get=requests.get, state=None, now=None):
         send(basket_text(b, p.get("lined") or []) + "\n\n" + FOOT)
         st[key] = sm["date"]
         sent.append(b["id"])
+        if state is None:                      # v2.95 주간 리뷰 기록(상태를 넘겨받은 테스트·미리보기는 적지 않는다)
+            import review
+            review.log("theme", b.get("name"), f"점화 {sm.get('strong')}/{sm.get('n_px')} · 평균 {_p(sm.get('avg_pct'))}", sm["date"])
     print(f"[테마] 바구니 {len(act)}개 중 새 점화 {len(sent)}개", flush=True)
     if sent:
         for k in sorted(st, key=lambda k: st[k])[:-KEEP_DAYS * 8 or None]:   # 오래된 키 정리(바구니 8개 × 30일 어림)

@@ -661,7 +661,8 @@ MENU_MESSAGE = (
     "<code>덜빠진</code> 지수 하락 때 덜 빠진 종목\n"
     "<code>테마</code> 테마 바구니 점화 현황\n"
     "<code>매수추적</code> 내 매수 종목 6개월 추적 현황\n"
-    "<code>매수추적 이름 티커 매수가</code> · <code>매수추적삭제 티커</code>\n\n"
+    "<code>매수추적 이름 티커 매수가</code> · <code>매수추적삭제 티커</code>\n"
+    "<code>주간리뷰</code> 이번 주 선·테마·매수 추적 정리\n\n"
     "<b>🪙 코인</b>\n"
     "<code>BTC</code> 현재가 · <code>상황</code> 상황판\n"
     "<code>요약 자세히</code> 코인 요약 전체\n\n"
@@ -719,6 +720,10 @@ def handle_message(text, chat_id):
     if text in ("이평전체", "이평 전체", "이평장중", "이평마감", "이평 마감"):   # v2.87 이평마감 = 이평전체   # v2.64 국내 전체 120·240 돌파 지금 다시 받기
         import ma_cross
         send_telegram(ma_cross.on_demand(SCANNER_URL, _SCANNER_HEADERS, "intraday" if text == "이평장중" else "close"), chat_id)
+        return
+    if text in ("주간리뷰", "주간 리뷰", "토요리뷰", "리뷰"):   # v2.95 토요일 주간 리뷰를 지금 다시
+        import review
+        send_telegram(review.weekly_text(get_stock_data, SCANNER_URL, _SCANNER_HEADERS), chat_id)
         return
     if text.startswith(("매수추적삭제", "매수추적 삭제")):   # v2.94 매수 종목 6개월 추적
         import buy_track
@@ -3033,6 +3038,8 @@ import theme_ignite
 theme_ignite.register(schedule, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.92 테마 점화(스캐너 v5.393 테마 바구니)
 import buy_track
 buy_track.register(schedule, get_stock_data, send_telegram)   # v2.94 매수 종목 6개월 추적(매수가 대비 단계 알림)
+import review
+review.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.95 토요일 09:05 KST 주간 리뷰
 import ma_cross  # v2.58 120·240일선 상향 돌파 — 장중 시도(잠정) 하루 1회 · 종가 확정(KR 20:20 KST · US 16:30 ET)
 ma_cross.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)  # v2.59 KR 전체 14:00·20:20 KST
 import training  # v2.60 매일 훈련 알림 — 요일별 오늘 할 일 + 매매 훈련 홈 링크(기본 오클랜드 09:30)
