@@ -662,7 +662,8 @@ MENU_MESSAGE = (
     "<code>테마</code> 테마 바구니 점화 현황\n"
     "<code>매수추적</code> 내 매수 종목 6개월 추적 현황\n"
     "<code>매수추적 이름 티커 매수가</code> · <code>매수추적삭제 티커</code>\n"
-    "<code>주간리뷰</code> 이번 주 선·테마·매수 추적 정리\n\n"
+    "<code>주간리뷰</code> 이번 주 선·테마·매수 추적 정리\n"
+    "<code>ATR 바이넥스 6861 6600</code> 하루 흔들림·손절 점검\n\n"
     "<b>🪙 코인</b>\n"
     "<code>BTC</code> 현재가 · <code>상황</code> 상황판\n"
     "<code>요약 자세히</code> 코인 요약 전체\n\n"
@@ -732,6 +733,10 @@ def handle_message(text, chat_id):
     if text.startswith(("매수추적", "매수 추적")) or text in ("매수추적목록", "내매수"):
         import buy_track
         send_telegram(buy_track.register_text(text, get_stock_data), chat_id)
+        return
+    if (text.split() or [""])[0].upper() == "ATR":   # v2.96 ATR 조회 — 일지 손절 점검(매매 훈련 홈 v58이 이 글을 만들어 줌)
+        import atr_check
+        send_telegram(atr_check.on_demand(text, resolve_ticker, naver_name_search), chat_id)
         return
     if text in ("테마", "테마점화", "테마 점화", "바구니"):   # v2.92 테마 바구니 현황(스캐너 v5.393)
         import theme_ignite
