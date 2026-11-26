@@ -660,6 +660,7 @@ MENU_MESSAGE = (
     "<code>거래대금</code> 시장 거래대금\n"
     "<code>덜빠진</code> 지수 하락 때 덜 빠진 종목\n"
     "<code>테마</code> 테마 바구니 점화 현황\n"
+    "<code>거래대금</code> 거래대금 상위 10 · 순위 변화\n"
     "<code>매수추적</code> 내 매수 종목 6개월 추적 현황\n"
     "<code>매수추적 이름 티커 매수가</code> · <code>매수추적삭제 티커</code>\n"
     "<code>주간리뷰</code> 이번 주 선·테마·매수 추적 정리\n"
@@ -737,6 +738,10 @@ def handle_message(text, chat_id):
     if (text.split() or [""])[0].upper() == "ATR":   # v2.96 ATR 조회 — 일지 손절 점검(매매 훈련 홈 v58이 이 글을 만들어 줌)
         import atr_check
         send_telegram(atr_check.on_demand(text, resolve_ticker, naver_name_search), chat_id)
+        return
+    if text in ("거래대금", "거래대금상위", "거래대금 상위", "대금"):   # v2.97 거래대금 상위 10(스캐너 v5.403)
+        import turnover_alert
+        send_telegram(turnover_alert.on_demand(), chat_id)
         return
     if text in ("테마", "테마점화", "테마 점화", "바구니"):   # v2.92 테마 바구니 현황(스캐너 v5.393)
         import theme_ignite
@@ -3041,6 +3046,8 @@ import trendlines  # v2.56 빗각(추세선) 추적 — 장중 접근(선 ±3%) 
 trendlines.register(schedule, get_stock_data, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.90 선 목록 = 스캐너 추적 장부
 import theme_ignite
 theme_ignite.register(schedule, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.92 테마 점화(스캐너 v5.393 테마 바구니)
+import turnover_alert
+turnover_alert.register(schedule, send_telegram, SCANNER_URL, _SCANNER_HEADERS)   # v2.97 거래대금 상위 10(스캐너 v5.403)
 import buy_track
 buy_track.register(schedule, get_stock_data, send_telegram)   # v2.94 매수 종목 6개월 추적(매수가 대비 단계 알림)
 import review
